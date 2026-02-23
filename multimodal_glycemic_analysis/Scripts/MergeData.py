@@ -11,11 +11,6 @@ import config as cfg
 # ============================
 
 def run_script(path: Path) -> None:
-    """
-    Esegue uno script .py come se fosse lanciato da terminale.
-    Questo fa scattare il blocco:
-        if __name__ == "__main__": main()
-    """
     runpy.run_path(str(path), run_name="__main__")
 
 
@@ -77,4 +72,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
