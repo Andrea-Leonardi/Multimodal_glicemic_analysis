@@ -32,7 +32,7 @@ def run_script(path: Path) -> None:
     """
     runpy.run_path(str(path), run_name="__lag__")
 
-if False:
+if True:
     scripts_dir = (Path(__file__).resolve().parents[0])
     run_script(scripts_dir / "Processing_and_descriptive.py")
 
@@ -384,4 +384,5 @@ for q in [35,50,65]:
 
 best = SVM_df.loc[SVM_df["AUC"].idxmax()]
 print(f"Best SVM (log selector) -> q = {best['q']} | AUC = {best['AUC']} | kernel = {best['kernel']}")
+
 
