@@ -19,11 +19,6 @@ from sklearn.linear_model import LogisticRegression
 # =========================
 
 def run_script(path: Path) -> None:
-    """
-    Esegue uno script .py come se fosse lanciato da terminale.
-    Questo fa scattare il blocco:
-        if __name__ == "__main__": main()
-    """
     runpy.run_path(str(path), run_name="__lag__")
 
 if False:
@@ -182,6 +177,7 @@ print(f"\nBest logistic model -> | quantile = {logregbest.iloc[0,0]} | AUC = {lo
 # =========================
 # 7) SVM
 # =========================
+
 
 
 
