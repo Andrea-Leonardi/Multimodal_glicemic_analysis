@@ -1,388 +1,343 @@
-import pandas as pd
-import numpy as np
-import config as cfg
-from pathlib import Path
-import runpy
+from __future__ import annotations
 
+import argparse
+import json
+
+import numpy as np
+import pandas as pd
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Lasso, LogisticRegression, Ridge
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.naive_bayes import GaussianNB
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-from sklearn.linear_model import Ridge
-from sklearn.linear_model import Lasso
-from sklearn.model_selection import GridSearchCV
-from sklearn.cross_decomposition import PLSRegression
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.naive_bayes import GaussianNB
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.svm import SVC
-from sklearn.feature_selection import SelectFromModel
 
+import config as cfg
+import Processing_and_descriptive as processing
 
+DEFAULT_CLASSIFICATION_QUANTILES = (0.35, 0.50, 0.65)
+GRID_N_JOBS = 1
 
-# =========================
-# Reload cleaning and preprocessing
-# =========================
 
-def run_script(path: Path) -> None:
-    """
-    Esegue uno script .py come se fosse lanciato da terminale.
-    Questo fa scattare il blocco:
-        if __name__ == "__main__": main()
-    """
-    runpy.run_path(str(path), run_name="__lag__")
+def load_processed_data(rebuild_processed: bool = True, lag_days: int = cfg.DEFAULT_LAG_DAYS) -> pd.DataFrame:
+    if rebuild_processed:
+        return processing.prepare_processed_dataset(rebuild_merged=True, save=True, lag_days=lag_days)
+    return pd.read_parquet(cfg.require_existing_path(cfg.DATA_PROCESSED)).sort_index()
 
-if True:
-    scripts_dir = (Path(__file__).resolve().parents[0])
-    run_script(scripts_dir / "Processing_and_descriptive.py")
 
-# =========================
-# Load data
-# =========================
-df = pd.read_parquet(cfg.DATA_PROCESSED).dropna()
-
-target_col = "bg_auc_above_limit_rate"
-y = df[target_col]
-
-#tolgo variabili che causano la risposta
-
-X = df.drop(columns=[target_col,"bg_mean","bg_sd","bg_cv","bg_min","bg_median","bg_max","bg_tir_%","bg_tar_%","ins_bolo_tot","ins_tot","ins_basal_tot"])
-
-# =========================
-# Defining variables
-# =========================
-
-cv = TimeSeriesSplit(n_splits=5)
-
-
-
-
-
-
-
-
-# =========================
-# 1) Lasso
-# =========================
-
-pipe = Pipeline([
-    ("scaler", StandardScaler()),
-    ("lasso", Lasso(max_iter=200000, tol=1e-4))
-    ])
-param_grid = {
-    "lasso__alpha": np.logspace(-3, 3, 80)}
-
-grid = GridSearchCV(pipe, param_grid, cv=cv,scoring="r2",n_jobs=-1)
-grid.fit(X,y)
-
-print("Lasso Best R2:", grid.best_score_)
-print("Lasso Best alpha:", grid.best_params_["lasso__alpha"])
-
-
-# =========================
-# 2) PCR RidgeCV
-# =========================
-pipe = Pipeline([
-    ("scaler", StandardScaler()),
-    ("pca", PCA()),
-    ("ridge", Ridge())
-])
-
-param_grid = {
-    "pca__n_components": range(2, min(15, X.shape[1])),
-    "ridge__alpha": np.logspace(0,5 , 50)
-}
-
-grid = GridSearchCV(
-    pipe,
-    param_grid,
-    cv=cv,
-    scoring="r2",
-    n_jobs=-1 #uso tutti i core della cpu
-)
-
-grid.fit(X, y)
-
-print("\nPCR RidgeCV Best R2:", grid.best_score_)
-print("PCR RidgeCV Best n_components:", grid.best_params_["pca__n_components"])
-print("PCR RidgeCV Best alpha:", grid.best_params_["ridge__alpha"])
-
-
-
-
-# =========================
-# 3) PLS
-# =========================
-
-pipe = Pipeline([
-    ("scaler", StandardScaler()),
-    ("pls", PLSRegression())
-    
-    ])
-param_grid = {
-    "pls__n_components": range(1,min(15, X.shape[1]))
-    }
-
-grid = GridSearchCV(
-    pipe,
-    param_grid,
-    cv=cv,
-    scoring= "r2",
-    n_jobs=-1
-    )
-
-grid.fit(X,y)
-print("\nPLS Best R2:", grid.best_score_)
-print("PLS Best n_components:", grid.best_params_["pls__n_components"])
-
-
-
-# =========================
-# MODIFY THE TARGET TO BINARY
-# =========================
-# =========================
-# 4) logistic regression
-# =========================
-
-
-
-logreg_df= pd.DataFrame(columns=["q", "AUC", "C"])
-
-
-for q in [35,50,65]:
-    q = q/100
-    y_bin = (y >= y.quantile(q)).astype(int)
-    #è 1 quando la glicemia va male e 0 quando va bene
-
-    
-    pipe = Pipeline([
-        ("scaler", StandardScaler()),
-        ("logit", LogisticRegression(max_iter=10000, class_weight="balanced"))
-        ])
-    
-    param_grid = {
-        "logit__C": np.logspace(-3, 3, 50)  # C = 1/lambda
-    }
-    
-    grid = GridSearchCV(
-        pipe,
-        param_grid,
-        cv=cv,
-        scoring="roc_auc",   # meglio di accuracy
-        n_jobs=-1
-    )
-    
-    grid.fit(X, y_bin)
-    
-    logreg_df.loc[len(logreg_df)] =[q,grid.best_score_,grid.best_params_["logit__C"]]
-
-logregbest = logreg_df[logreg_df["AUC"]==logreg_df["AUC"].max()]
-
-print(f"\nBest logistic model -> | quantile = {logregbest.iloc[0,0]} | AUC = {logregbest.iloc[0,1]} | C = {logregbest.iloc[0,2]}")
-
-# =========================
-# 5) Naive Bayes
-# =========================
-
-NB_df= pd.DataFrame(columns=["q", "AUC"])
-
-
-for q in [35,50,65]:
-    q = q/100
-    y_bin = (y >= y.quantile(q)).astype(int)
-    #è 1 quando la glicemia va male e 0 quando va bene
-
-    
-    pipe = Pipeline([
-        ("scaler", StandardScaler()),
-        ("nb", GaussianNB())
-        ])
-
-    
-    grid = GridSearchCV(
-        pipe,
-        param_grid ={},
-        cv=cv,
-        scoring="roc_auc",   # meglio di accuracy
-        n_jobs=-1
-    )
-    
-    grid.fit(X, y_bin)
-    
-    NB_df.loc[len(NB_df)] = [q,grid.best_score_]
-
-NB_df = NB_df[NB_df["AUC"]==NB_df["AUC"].max()]
-
-print(f"\nBest NaiveBayes -> | quantile = {NB_df.iloc[0,0]} | AUC = {NB_df.iloc[0,1]}")
-
-# =========================
-# 6) LDA
-# =========================
-
-LDA_df= pd.DataFrame(columns=["q", "AUC"])
-
-
-for q in [35,50,65]:
-    q = q/100
-    y_bin = (y >= y.quantile(q)).astype(int)
-    #è 1 quando la glicemia va male e 0 quando va bene
-
-    
-    pipe = Pipeline([
-        ("scaler", StandardScaler()),
-        ("lda", LinearDiscriminantAnalysis())
-        ])
-
-    
-    grid = GridSearchCV(
-        pipe,
-        param_grid ={},
-        cv=cv,
-        scoring="roc_auc",   # meglio di accuracy
-        n_jobs=-1
-    )
-    
-    grid.fit(X, y_bin)
-    
-    LDA_df.loc[len(LDA_df)] = [q,grid.best_score_]
-
-LDA_df = LDA_df[LDA_df["AUC"]==LDA_df["AUC"].max()]
-
-print(f"\nBest LDA -> | quantile = {LDA_df.iloc[0,0]} | AUC = {LDA_df.iloc[0,1]}")
-
-# =========================
-# 7) SVM 
-# =========================
-SVM_df= pd.DataFrame(columns=["q", "AUC","kernel"])
-
-
-for q in [35,50,65]:
-    q = q/100
-    y_bin = (y >= y.quantile(q)).astype(int)
-    #è 1 quando la glicemia va male e 0 quando va bene
-    
-    pipe = Pipeline([
-        ("scaler", StandardScaler()),
-        ("svm", SVC(class_weight="balanced"))  # decision_function disponibile
-    ])
-    
-    param_grid = [
-        # LINEARE
-        {
-            "svm__kernel": ["linear"],
-            "svm__C": np.logspace(-3, 3, 25)
-        },
-        # RBF
-        {
-            "svm__kernel": ["rbf"],
-            "svm__C": np.logspace(-1, 2, 15),
-            "svm__gamma": np.logspace(-4, -1, 15)  # gamma = 1/(2*sigma^2)
-        }
+def select_feature_columns(
+    df: pd.DataFrame,
+    lag_days: int = cfg.DEFAULT_LAG_DAYS,
+    min_availability: float = cfg.MIN_FEATURE_AVAILABILITY,
+) -> list[str]:
+    lagged_cols = [
+        col
+        for col in df.columns
+        if any(col.endswith(f"_lag{lag}") for lag in range(1, lag_days + 1))
     ]
-    
-    grid = GridSearchCV(
-        pipe,
-        param_grid=param_grid,
-        cv=cv,
-        scoring="roc_auc",
-        n_jobs=-1
+    feature_cols = sorted(
+        col for col in lagged_cols if df[col].notna().mean() >= min_availability
     )
-    
-    grid.fit(X, y_bin)
-    SVM_df.loc[len(SVM_df)] = [q, grid.best_score_, grid.best_params_["svm__kernel"]]
-
-best = SVM_df.loc[SVM_df["AUC"].idxmax()]
-print(f"Best SVM -> q = {best['q']} | AUC = {best['AUC']} | kernel = {best['kernel']}")
-
-# =========================
-# 7) SVM PCA
-# =========================
-SVM_df= pd.DataFrame(columns=["q", "AUC","kernel"])
+    if "day" in df.columns:
+        feature_cols = ["day", *feature_cols]
+    if not feature_cols:
+        raise ValueError("No lagged feature columns were found in the processed dataset.")
+    return feature_cols
 
 
-for q in [35,50,65]:
-    q = q/100
-    y_bin = (y >= y.quantile(q)).astype(int)
-    #è 1 quando la glicemia va male e 0 quando va bene
-    
-    pipe = Pipeline([
-        ("scaler", StandardScaler()),
-        ("pca", PCA(n_components=10)),
-        ("svm", SVC(class_weight="balanced"))  # decision_function disponibile
-    ])
-    
-    param_grid = [
-        # LINEARE
-        {
-            "svm__kernel": ["linear"],
-            "svm__C": np.logspace(-3, 3, 25)
-        },
-        # RBF
-        {
-            "svm__kernel": ["rbf"],
-            "svm__C": np.logspace(-1, 2, 15),
-            "svm__gamma": np.logspace(-4, -1, 15)  # gamma = 1/(2*sigma^2)
-        }
+def prepare_training_data(
+    df: pd.DataFrame,
+    *,
+    target_col: str = cfg.DEFAULT_TARGET_COLUMN,
+    lag_days: int = cfg.DEFAULT_LAG_DAYS,
+) -> tuple[pd.DataFrame, pd.Series]:
+    feature_cols = select_feature_columns(df, lag_days=lag_days)
+    modeling_df = df.sort_index().iloc[lag_days:].copy()
+    modeling_df = modeling_df.loc[modeling_df[target_col].notna()].copy()
+    return modeling_df[feature_cols], modeling_df[target_col]
+
+
+def split_train_holdout(
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    holdout_days: int = 14,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    if holdout_days < 1:
+        raise ValueError("holdout_days must be at least 1.")
+    if len(X) <= holdout_days + 10:
+        raise ValueError("Not enough samples to create a meaningful holdout split.")
+    return X.iloc[:-holdout_days], X.iloc[-holdout_days:], y.iloc[:-holdout_days], y.iloc[-holdout_days:]
+
+
+def _make_cv(n_samples: int) -> TimeSeriesSplit:
+    n_splits = min(5, max(2, n_samples // 20))
+    if n_samples <= n_splits:
+        raise ValueError("Not enough samples for TimeSeriesSplit.")
+    return TimeSeriesSplit(n_splits=n_splits)
+
+
+def _serialise_params(params: dict) -> str:
+    return json.dumps(params, sort_keys=True, default=str)
+
+
+def _holdout_auc(estimator, X_test: pd.DataFrame, y_test: pd.Series) -> float:
+    if y_test.nunique() < 2:
+        return float("nan")
+    if hasattr(estimator, "decision_function"):
+        scores = estimator.decision_function(X_test)
+    else:
+        scores = estimator.predict_proba(X_test)[:, 1]
+    return float(roc_auc_score(y_test, scores))
+
+
+def benchmark_regression(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_holdout: pd.DataFrame,
+    y_holdout: pd.Series,
+) -> pd.DataFrame:
+    cv = _make_cv(len(X_train))
+    max_components = max(2, min(10, X_train.shape[1]))
+
+    model_specs = [
+        (
+            "lasso",
+            Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    ("model", Lasso(max_iter=200000, tol=1e-4)),
+                ]
+            ),
+            {"model__alpha": np.logspace(-3, 2, 20)},
+        ),
+        (
+            "pcr_ridge",
+            Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    ("pca", PCA()),
+                    ("model", Ridge()),
+                ]
+            ),
+            {
+                "pca__n_components": list(range(2, max_components + 1)),
+                "model__alpha": np.logspace(-2, 4, 12),
+            },
+        ),
+        (
+            "pls",
+            Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    ("model", PLSRegression()),
+                ]
+            ),
+            {"model__n_components": list(range(1, min(8, X_train.shape[1]) + 1))},
+        ),
     ]
-    
-    grid = GridSearchCV(
-        pipe,
-        param_grid=param_grid,
-        cv=cv,
-        scoring="roc_auc",
-        n_jobs=-1
-    )
-    
-    grid.fit(X, y_bin)
-    SVM_df.loc[len(SVM_df)] = [q, grid.best_score_, grid.best_params_["svm__kernel"]]
 
-best = SVM_df.loc[SVM_df["AUC"].idxmax()]
-print(f"Best SVM (PCA) -> q = {best['q']} | AUC = {best['AUC']} | kernel = {best['kernel']}")
+    rows: list[dict] = []
+    for model_name, estimator, param_grid in model_specs:
+        search = GridSearchCV(
+            estimator,
+            param_grid=param_grid,
+            cv=cv,
+            scoring="r2",
+            n_jobs=GRID_N_JOBS,
+            error_score=np.nan,
+        )
+        search.fit(X_train, y_train)
+        rows.append(
+            {
+                "task": "regression",
+                "model": model_name,
+                "quantile": np.nan,
+                "metric": "r2",
+                "cv_score": float(search.best_score_),
+                "holdout_score": float(search.best_estimator_.score(X_holdout, y_holdout)),
+                "best_params": _serialise_params(search.best_params_),
+                "n_train": len(X_train),
+                "n_holdout": len(X_holdout),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values(["cv_score", "holdout_score"], ascending=False)
 
 
-# =========================
-# 7) SVM (log selector)
-# =========================
-SVM_df= pd.DataFrame(columns=["q", "AUC","kernel"])
-
-
-for q in [35,50,65]:
-    q = q/100
-    y_bin = (y >= y.quantile(q)).astype(int)
-    #è 1 quando la glicemia va male e 0 quando va bene
-    
-    pipe = Pipeline([
-        ("scaler", StandardScaler()),
-        ("selector", SelectFromModel(LogisticRegression(l1_ratio=1,solver="liblinear"))),
-        ("svm", SVC(class_weight="balanced"))  # decision_function disponibile
-    ])
-    
-    param_grid = [
-        # LINEARE
-        {
-            "svm__kernel": ["linear"],
-            "svm__C": np.logspace(-3, 3, 25)
-        },
-        # RBF
-        {
-            "svm__kernel": ["rbf"],
-            "svm__C": np.logspace(-1, 2, 15),
-            "svm__gamma": np.logspace(-4, -1, 15)  # gamma = 1/(2*sigma^2)
-        }
+def benchmark_classification(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_holdout: pd.DataFrame,
+    y_holdout: pd.Series,
+    *,
+    quantiles: tuple[float, ...] = DEFAULT_CLASSIFICATION_QUANTILES,
+) -> pd.DataFrame:
+    cv = _make_cv(len(X_train))
+    model_specs = [
+        (
+            "logistic",
+            Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    (
+                        "model",
+                        LogisticRegression(
+                            max_iter=10000,
+                            class_weight="balanced",
+                            solver="liblinear",
+                        ),
+                    ),
+                ]
+            ),
+            {"model__C": np.logspace(-2, 2, 10)},
+        ),
+        (
+            "naive_bayes",
+            Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("model", GaussianNB()),
+                ]
+            ),
+            {},
+        ),
+        (
+            "lda",
+            Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    ("model", LinearDiscriminantAnalysis()),
+                ]
+            ),
+            {},
+        ),
+        (
+            "svm_linear",
+            Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    ("model", SVC(kernel="linear", class_weight="balanced")),
+                ]
+            ),
+            {"model__C": np.logspace(-2, 2, 10)},
+        ),
+        (
+            "svm_rbf",
+            Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    ("model", SVC(kernel="rbf", class_weight="balanced")),
+                ]
+            ),
+            {
+                "model__C": np.logspace(-1, 2, 8),
+                "model__gamma": np.logspace(-4, -1, 8),
+            },
+        ),
     ]
-    
-    grid = GridSearchCV(
-        pipe,
-        param_grid=param_grid,
-        cv=cv,
-        scoring="roc_auc",
-        n_jobs=-1
+
+    rows: list[dict] = []
+    for quantile in quantiles:
+        threshold = float(y_train.quantile(quantile))
+        y_train_bin = (y_train >= threshold).astype(int)
+        y_holdout_bin = (y_holdout >= threshold).astype(int)
+
+        for model_name, estimator, param_grid in model_specs:
+            search = GridSearchCV(
+                estimator,
+                param_grid=param_grid,
+                cv=cv,
+                scoring="roc_auc",
+                n_jobs=GRID_N_JOBS,
+                error_score=np.nan,
+            )
+            search.fit(X_train, y_train_bin)
+            rows.append(
+                {
+                    "task": "classification",
+                    "model": model_name,
+                    "quantile": quantile,
+                    "metric": "roc_auc",
+                    "cv_score": float(search.best_score_),
+                    "holdout_score": _holdout_auc(search.best_estimator_, X_holdout, y_holdout_bin),
+                    "best_params": _serialise_params(search.best_params_),
+                    "threshold": threshold,
+                    "n_train": len(X_train),
+                    "n_holdout": len(X_holdout),
+                }
+            )
+
+    return pd.DataFrame(rows).sort_values(["cv_score", "holdout_score"], ascending=False)
+
+
+def save_results(results: pd.DataFrame, output_path=cfg.ML_RESULTS) -> None:
+    cfg.ensure_processed_dir()
+    results.to_csv(output_path, index=False)
+
+
+def run_modeling(
+    *,
+    rebuild_processed: bool = True,
+    lag_days: int = cfg.DEFAULT_LAG_DAYS,
+    holdout_days: int = 14,
+    task: str = "all",
+) -> pd.DataFrame:
+    processed_df = load_processed_data(rebuild_processed=rebuild_processed, lag_days=lag_days)
+    X, y = prepare_training_data(processed_df, lag_days=lag_days)
+    X_train, X_holdout, y_train, y_holdout = split_train_holdout(X, y, holdout_days=holdout_days)
+
+    outputs: list[pd.DataFrame] = []
+    if task in {"all", "regression"}:
+        outputs.append(benchmark_regression(X_train, y_train, X_holdout, y_holdout))
+    if task in {"all", "classification"}:
+        outputs.append(benchmark_classification(X_train, y_train, X_holdout, y_holdout))
+
+    results = pd.concat(outputs, ignore_index=True).sort_values(
+        ["task", "cv_score", "holdout_score"], ascending=[True, False, False]
     )
-    
-    grid.fit(X, y_bin)
-    SVM_df.loc[len(SVM_df)] = [q, grid.best_score_, grid.best_params_["svm__kernel"]]
-
-best = SVM_df.loc[SVM_df["AUC"].idxmax()]
-print(f"Best SVM (log selector) -> q = {best['q']} | AUC = {best['AUC']} | kernel = {best['kernel']}")
+    save_results(results)
+    return results
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run time-aware ML benchmarks on lagged daily features.")
+    parser.add_argument(
+        "--reuse-processed",
+        action="store_true",
+        help="Reuse data_processed.parquet instead of rebuilding the pipeline first.",
+    )
+    parser.add_argument("--lag-days", type=int, default=cfg.DEFAULT_LAG_DAYS)
+    parser.add_argument("--holdout-days", type=int, default=14)
+    parser.add_argument(
+        "--task",
+        choices=["all", "regression", "classification"],
+        default="all",
+    )
+    args = parser.parse_args()
+
+    results = run_modeling(
+        rebuild_processed=not args.reuse_processed,
+        lag_days=args.lag_days,
+        holdout_days=args.holdout_days,
+        task=args.task,
+    )
+
+    print(results.head(10).to_string(index=False))
+    print(f"\nSaved: {cfg.ML_RESULTS}")
+
+
+if __name__ == "__main__":
+    main()

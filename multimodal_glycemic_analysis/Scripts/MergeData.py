@@ -1,76 +1,79 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
-import runpy
+
 import pandas as pd
+
 import config as cfg
-
-
-# ============================
-# Helpers
-# ============================
-
-def run_script(path: Path) -> None:
-    runpy.run_path(str(path), run_name="__main__")
+import GlookoDataCleaning as glooko_cleaning
+import XiaomiDataCleaning as xiaomi_cleaning
 
 
 def load_df(parquet_path: Path) -> pd.DataFrame:
-
-    if parquet_path.exists():
-        try:
-            return pd.read_parquet(parquet_path)
-        except Exception as e:
-            print(f"[WARN] Parquet read failed ({parquet_path.name}): {repr(e)}")
-
+    return pd.read_parquet(cfg.require_existing_path(parquet_path))
 
 
 def normalize_daily_index(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Uniforma l'indice a DatetimeIndex giornaliero (00:00), così il join è stabile.
-    """
     out = df.copy()
     out.index = pd.to_datetime(out.index, errors="coerce").normalize()
-    out = out[~out.index.isna()].sort_index()
+    out = out.loc[~out.index.isna()].sort_index()
     return out
 
 
-# ============================
-# Main
-# ============================
+def build_cleaned_dataset(save_intermediate: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    xiaomi = normalize_daily_index(xiaomi_cleaning.clean_xiaomi_data())
+    if xiaomi.empty:
+        raise ValueError("Xiaomi cleaning produced an empty dataset.")
 
-def main():
-    scripts_dir = (Path(__file__).resolve().parents[0])
+    window_start = xiaomi.index.min()
+    window_end = xiaomi.index.max() + pd.Timedelta(days=1)
+    glooko = normalize_daily_index(
+        glooko_cleaning.clean_glooko_data(start=window_start, end=window_end)
+    )
+    if glooko.empty:
+        raise ValueError("Glooko cleaning produced an empty dataset.")
 
-    xiaomi_script = scripts_dir / "XiaomiDataCleaning.py"
-    glooko_script = scripts_dir / "GlookoDataCleaning.py"
+    merged = glooko.join(xiaomi, how="outer", lsuffix="_glooko", rsuffix="_xiaomi").sort_index()
 
-    # 1) Esegui i cleaning scripts (rigenerano gli export)
-    run_script(xiaomi_script)
-    run_script(glooko_script)
+    if save_intermediate:
+        xiaomi_cleaning.save_xiaomi_data(xiaomi)
+        glooko_cleaning.save_glooko_data(glooko)
+        save_merged_data(merged)
 
-    # 2) Carica gli output
-    glooko_parquet = Path(cfg.GLOOKO_DATA_CLEANED)
-    xiaomi_parquet = Path(cfg.XIAOMI_DATA_CLEANED)
+    return merged, glooko, xiaomi
 
-    glooko = load_df(glooko_parquet)
-    xiaomi = load_df(xiaomi_parquet)
 
-    # 3) Allinea indice giornaliero
-    glooko = normalize_daily_index(glooko)
-    xiaomi = normalize_daily_index(xiaomi)
+def save_merged_data(df: pd.DataFrame, output_path: Path | None = None) -> Path:
+    output_path = output_path or cfg.DATA_CLEANED
+    cfg.ensure_processed_dir()
+    df.to_parquet(output_path, engine="pyarrow", index=True)
+    return output_path
 
-    # 4) Join (outer per non perdere giorni)
-    df = glooko.join(xiaomi, how="outer", lsuffix="_glooko", rsuffix="_xiaomi").sort_index()
-    
-    # 5) Export merged
 
-    try:
-        df.to_parquet(cfg.DATA_CLEANED)
-        print("Saved:", cfg.DATA_CLEANED)
-    except Exception as e:
-        print("Parquet export failed:", repr(e))
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build the merged daily dataset.")
+    parser.add_argument(
+        "--from-existing",
+        action="store_true",
+        help="Merge existing cleaned parquet files instead of rebuilding from raw data.",
+    )
+    parser.add_argument("--output", type=Path, default=cfg.DATA_CLEANED)
+    args = parser.parse_args()
+
+    if args.from_existing:
+        glooko = normalize_daily_index(load_df(cfg.GLOOKO_DATA_CLEANED))
+        xiaomi = normalize_daily_index(load_df(cfg.XIAOMI_DATA_CLEANED))
+        merged = glooko.join(xiaomi, how="outer", lsuffix="_glooko", rsuffix="_xiaomi").sort_index()
+        saved_path = save_merged_data(merged, args.output)
+    else:
+        merged, _, _ = build_cleaned_dataset(save_intermediate=True)
+        saved_path = args.output
+        if args.output != cfg.DATA_CLEANED:
+            saved_path = save_merged_data(merged, args.output)
+
+    print(f"Saved: {saved_path} | rows={len(merged)} | columns={len(merged.columns)}")
+
 
 if __name__ == "__main__":
     main()
-
-
