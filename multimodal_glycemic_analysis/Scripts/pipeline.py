@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 import MergeData as merge_data
 import MLapplications as ml
@@ -9,7 +10,7 @@ import Processing_and_descriptive as processing
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the glycemic analysis pipeline.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("clean", help="Rebuild cleaned and merged daily datasets.")
 
@@ -36,6 +37,17 @@ def main() -> None:
         default="all",
     )
 
+    if len(sys.argv) == 1:
+        parser.print_help()
+        print(
+            "\nExamples:\n"
+            "  python pipeline.py clean\n"
+            "  python pipeline.py features --lag-days 2\n"
+            "  python pipeline.py train --task all --holdout-days 14\n"
+            "  python pipeline.py all"
+        )
+        return
+
     args = parser.parse_args()
 
     if args.command == "clean":
@@ -59,7 +71,8 @@ def main() -> None:
             holdout_days=args.holdout_days,
             task=args.task,
         )
-        print(results.head(10).to_string(index=False))
+        print(ml.format_results(results))
+        print(f"\nSaved CSV: {ml.cfg.ML_RESULTS}")
         return
 
     merge_data.build_cleaned_dataset(save_intermediate=True)
@@ -70,7 +83,8 @@ def main() -> None:
         holdout_days=args.holdout_days,
         task=args.task,
     )
-    print(results.head(10).to_string(index=False))
+    print(ml.format_results(results))
+    print(f"\nSaved CSV: {ml.cfg.ML_RESULTS}")
 
 
 if __name__ == "__main__":

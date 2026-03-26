@@ -10,6 +10,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1] / "multimodal_glycemic_analysis
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import MergeData as merge_data
+import MLapplications as ml
 import Processing_and_descriptive as processing
 import config as cfg
 
@@ -52,6 +53,43 @@ class PipelineHelpersTest(unittest.TestCase):
         self.assertTrue(exports)
         self.assertEqual(exports, sorted(exports))
         self.assertTrue(all(path.is_dir() for path in exports))
+
+    def test_format_results_creates_readable_sections(self) -> None:
+        results = pd.DataFrame(
+            [
+                {
+                    "task": "regression",
+                    "model": "lasso",
+                    "quantile": pd.NA,
+                    "metric": "r2",
+                    "cv_score": 0.1234,
+                    "holdout_score": -0.4321,
+                    "best_params": '{"model__alpha": 0.1}',
+                    "n_train": 100,
+                    "n_holdout": 14,
+                },
+                {
+                    "task": "classification",
+                    "model": "svm_rbf",
+                    "quantile": 0.35,
+                    "metric": "roc_auc",
+                    "cv_score": 0.6789,
+                    "holdout_score": 0.5432,
+                    "best_params": '{"model__C": 10.0, "model__gamma": 0.001}',
+                    "threshold": 7.94,
+                    "n_train": 100,
+                    "n_holdout": 14,
+                },
+            ]
+        )
+
+        formatted = ml.format_results(results)
+
+        self.assertIn("Training Summary", formatted)
+        self.assertIn("Regression", formatted)
+        self.assertIn("Classification", formatted)
+        self.assertIn("alpha=0.1", formatted)
+        self.assertIn("cutoff=7.940", formatted)
 
 
 if __name__ == "__main__":

@@ -1,19 +1,27 @@
 task,model,quantile,metric,cv_score,holdout_score,best_params,n_train,n_holdout,threshold
 classification,svm_rbf,0.35,roc_auc,0.6641538814709186,0.46153846153846156,"{""model__C"": 13.894954943731374, ""model__gamma"": 0.0019306977288832496}",245,14,7.939541314342008
 classification,svm_linear,0.35,roc_auc,0.6538731748061376,0.38461538461538464,"{""model__C"": 0.027825594022071243}",245,14,7.939541314342008
+classification,hist_gb,0.35,roc_auc,0.6460812363491015,0.15384615384615385,"{""model__learning_rate"": 0.1, ""model__max_depth"": 2, ""model__max_leaf_nodes"": 7, ""model__min_samples_leaf"": 5}",245,14,7.939541314342008
 classification,lda,0.35,roc_auc,0.644433797562087,0.3076923076923077,{},245,14,7.939541314342008
 classification,logistic,0.35,roc_auc,0.6434897944803232,0.3076923076923077,"{""model__C"": 0.21544346900318834}",245,14,7.939541314342008
+classification,logistic_elasticnet,0.35,roc_auc,0.640706513049866,0.3076923076923077,"{""model__C"": 1.9306977288832496, ""model__l1_ratio"": 0.3}",245,14,7.939541314342008
 classification,lda,0.5,roc_auc,0.6085810898213275,0.42500000000000004,{},245,14,8.910173051915574
 classification,svm_linear,0.5,roc_auc,0.6035262214676477,0.5,"{""model__C"": 35.93813663804626}",245,14,8.910173051915574
+classification,logistic_elasticnet,0.65,roc_auc,0.5987923900660743,0.3125,"{""model__C"": 0.13894954943731375, ""model__l1_ratio"": 0.9}",245,14,10.215204625543167
 classification,logistic,0.5,roc_auc,0.5949807852965747,0.425,"{""model__C"": 100.0}",245,14,8.910173051915574
 classification,lda,0.65,roc_auc,0.5931358249332841,0.33333333333333337,{},245,14,10.215204625543167
+classification,hist_gb,0.5,roc_auc,0.5891431401083354,0.2,"{""model__learning_rate"": 0.03, ""model__max_depth"": 3, ""model__max_leaf_nodes"": 7, ""model__min_samples_leaf"": 5}",245,14,8.910173051915574
+classification,logistic_elasticnet,0.5,roc_auc,0.5827664995822891,0.45,"{""model__C"": 100.0, ""model__l1_ratio"": 0.9}",245,14,8.910173051915574
 classification,svm_linear,0.65,roc_auc,0.5815747652831138,0.33333333333333337,"{""model__C"": 0.5994842503189409}",245,14,10.215204625543167
 classification,svm_rbf,0.5,roc_auc,0.574011399466408,0.6000000000000001,"{""model__C"": 13.894954943731374, ""model__gamma"": 0.0019306977288832496}",245,14,8.910173051915574
 classification,svm_rbf,0.65,roc_auc,0.5678275511139395,0.3333333333333333,"{""model__C"": 100.0, ""model__gamma"": 0.0019306977288832496}",245,14,10.215204625543167
 classification,logistic,0.65,roc_auc,0.5650495635640826,0.35416666666666663,"{""model__C"": 100.0}",245,14,10.215204625543167
 classification,naive_bayes,0.35,roc_auc,0.5604049386789859,0.3076923076923077,{},245,14,7.939541314342008
 classification,naive_bayes,0.65,roc_auc,0.5396033922318859,0.39583333333333337,{},245,14,10.215204625543167
+classification,hist_gb,0.65,roc_auc,0.524491336884531,0.4270833333333333,"{""model__learning_rate"": 0.03, ""model__max_depth"": 2, ""model__max_leaf_nodes"": 7, ""model__min_samples_leaf"": 5}",245,14,10.215204625543167
 classification,naive_bayes,0.5,roc_auc,0.5149586196674483,0.55,{},245,14,8.910173051915574
 regression,pcr_ridge,,r2,0.03282515109906301,-0.4135793185954353,"{""model__alpha"": 18.73817422860383, ""pca__n_components"": 9}",245,14,
+regression,elastic_net,,r2,0.02440641278897262,-0.28061001780525596,"{""model__alpha"": 0.46415888336127775, ""model__l1_ratio"": 0.1}",245,14,
 regression,pls,,r2,0.008326767961210546,-0.4985980481837231,"{""model__n_components"": 3}",245,14,
 regression,lasso,,r2,-0.004539844148674588,-0.4118906595950793,"{""model__alpha"": 0.06951927961775606}",245,14,
+regression,hist_gb,,r2,-0.08762188713113224,-0.24739317212158785,"{""model__learning_rate"": 0.03, ""model__max_depth"": 2, ""model__max_leaf_nodes"": 7, ""model__min_samples_leaf"": 20}",245,14,
