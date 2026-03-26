@@ -265,12 +265,3 @@ Natural next steps include:
 - SHAP or permutation-based feature importance analysis
 - experiment tracking and model comparison dashboards
 
-## Portfolio Positioning
-
-From a CV or portfolio perspective, this project shows the ability to:
-
-- design a complete data pipeline from raw data to model evaluation
-- work with noisy real-world physiological data
-- write reusable analytical code rather than one-off analyses
-- reason about time-series leakage and temporal validation
-- communicate technical work clearly through documentation and structured outputs
