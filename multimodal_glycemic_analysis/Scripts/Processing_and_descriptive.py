@@ -1,115 +1,175 @@
+from __future__ import annotations
+
+"""
+This script prepares the merged daily dataset for modeling.
+
+Its main role is feature engineering: it creates lagged predictors so that the
+models can use recent history rather than same-day information only. The file
+also contains optional descriptive plots for quick exploratory analysis.
+
+The workflow is:
+1. load or rebuild the merged daily dataset,
+2. create lagged versions of the selected variables,
+3. save the processed modeling table,
+4. optionally display boxplots and correlation heatmaps.
+"""
+
+import argparse
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import config as cfg
 import seaborn as sns
-from pathlib import Path
-import runpy
+
+import config as cfg
+import MergeData as merge_data
 
 
+def load_merged_data(path: Path | None = None) -> pd.DataFrame:
+    """Load the merged daily dataset from disk."""
+    return pd.read_parquet(cfg.require_existing_path(path or cfg.DATA_CLEANED)).sort_index()
 
 
-
-def run_script(path: Path) -> None:
-    """
-    Esegue uno script .py come se fosse lanciato da terminale.
-    Questo fa scattare il blocco:
-        if __name__ == "__main__": main()
-    """
-    runpy.run_path(str(path), run_name="__main__")
-
-if True:
-    scripts_dir = (Path(__file__).resolve().parents[0])
-    run_script(scripts_dir / "MergeData.py")
-
-df = pd.read_parquet(cfg.DATA_CLEANED)
-
-#=============================
-#BOXPLOT
-#=============================
-
-def boxplot(df):
+def boxplot(df: pd.DataFrame) -> None:
+    """Show simple boxplots for the numeric columns."""
     step = 6
-    for start in range(0, df.shape[1], step):
-        sub = df.iloc[:, start:start+step]      # fino a 6 colonne
-        sub = sub.select_dtypes("number") 
-        
-        fig, axes = plt.subplots(1, sub.shape[1], figsize=(3*sub.shape[1], 4), sharey=False)
-        if sub.shape[1] == 1:
+    numeric_df = df.select_dtypes("number")
+    for start in range(0, numeric_df.shape[1], step):
+        subset = numeric_df.iloc[:, start : start + step]
+        fig, axes = plt.subplots(1, subset.shape[1], figsize=(3 * subset.shape[1], 4), sharey=False)
+        if subset.shape[1] == 1:
             axes = [axes]
-    
-        for ax, col in zip(axes, sub.columns):
-            ax.boxplot(sub[col].dropna().values)
+
+        for ax, col in zip(axes, subset.columns):
+            ax.boxplot(subset[col].dropna().values)
             ax.set_title(col, fontsize=9)
             ax.grid(True, axis="y", alpha=0.3)
-    
+
         plt.tight_layout()
         plt.show()
 
-#=============================
-#CORRPLOT
-#=============================
-    
-def corrplot(df, r):
 
+def corrplot(df: pd.DataFrame, threshold: float) -> None:
+    """Show a Spearman correlation heatmap with optional annotation threshold."""
     corr = df.select_dtypes("number").corr(method="spearman")
     annot = corr.round(2).astype(str)
-    annot[np.abs(corr) < r] = ""   # non scrive i numeri piccoli
-    
+    annot[np.abs(corr) < threshold] = ""
+
     plt.figure(figsize=(16, 12))
-    sns.heatmap(corr, annot=annot, fmt="", annot_kws={"size": 6},
-                vmin=-1, vmax=1, center=0)
+    sns.heatmap(corr, annot=annot, fmt="", annot_kws={"size": 6}, vmin=-1, vmax=1, center=0)
     plt.tight_layout()
     plt.show()
-    
-#=============================
-#FURTHER MANIPULATIONS ON MERGED DATASET
-#=============================
 
-def lag():
-    
-    #creo una colonna con il numero dei giorni sequenziale
-    df["day"] = range(df.shape[0])
 
-    #laggo i dati    
-        
-    k = 2
-    toLag = ["training",
-             "bg_mean",
-             "bg_sd",
-             "bg_max",
-             "bg_auc_above_limit_rate",
-             "cartridge_loaded",
-             "carb_daily",
-             "sl_tot_duration",
-             "sl_score",
-             "sl_bedtime_mfm",
-             "steps"]
-    
-    df_lag = df.copy()
-    
-    for i in range(k):
-        for col in toLag:
-            df_lag[f"{col}_lag{i+1}"] = df_lag[col].shift(i+1)
-        
-    
-    corrplot(df_lag, 0.2)
-    
-    #export lagged
-    
-    if True:
-        try:
-            df_export = df_lag.copy()
-            df_export.index = pd.to_datetime(df_export.index)
-            pq_path = cfg.DATA_PROCESSED
-            df_export.to_parquet(pq_path, engine="pyarrow", index=True)
-            print("Saved:", pq_path)
-            
-            df_export.to_csv(cfg.PROCESSED_SUBDIR/"dataproc.csv")
-        except Exception as e:
-            print("Parquet export failed:", repr(e))
+def build_lagged_dataset(
+    df: pd.DataFrame,
+    *,
+    lag_days: int = cfg.DEFAULT_LAG_DAYS,
+    lag_columns: list[str] | None = None,
+    include_day_index: bool = True,
+) -> pd.DataFrame:
+    """Create lagged predictors from the selected daily columns."""
+    if lag_days < 1:
+        raise ValueError("lag_days must be at least 1.")
 
-if __name__ == "__lag__":
-    lag()
-    
+    out = df.copy().sort_index()
+    columns = lag_columns or [col for col in cfg.DEFAULT_LAG_COLUMNS if col in out.columns]
+    if not columns:
+        raise ValueError("No valid columns available for lag feature generation.")
 
+    missing = sorted(set(columns) - set(out.columns))
+    if missing:
+        raise KeyError(f"Missing columns required for lagging: {missing}")
+
+    if include_day_index and "day" not in out.columns:
+        out["day"] = range(len(out))
+
+    for lag in range(1, lag_days + 1):
+        for col in columns:
+            out[f"{col}_lag{lag}"] = out[col].shift(lag)
+
+    return out
+
+
+def save_lagged_dataset(
+    df: pd.DataFrame,
+    parquet_path: Path | None = None,
+    csv_path: Path | None = None,
+) -> tuple[Path, Path]:
+    """Persist the lagged dataset used by the modeling stage."""
+    parquet_path = parquet_path or cfg.DATA_PROCESSED
+    csv_path = csv_path or cfg.DATA_PROCESSED_CSV
+    cfg.ensure_processed_dir()
+    df.to_parquet(parquet_path, engine="pyarrow", index=True)
+    df.to_csv(csv_path)
+
+    # Legacy artifact kept in sync for backward compatibility.
+    if parquet_path != cfg.DATA_LAGGED:
+        df.to_parquet(cfg.DATA_LAGGED, engine="pyarrow", index=True)
+
+    return parquet_path, csv_path
+
+
+def prepare_processed_dataset(
+    *,
+    rebuild_merged: bool = True,
+    save: bool = True,
+    lag_days: int = cfg.DEFAULT_LAG_DAYS,
+) -> pd.DataFrame:
+    """Build or reload the merged dataset and then create lagged features."""
+
+    # ==================================================
+    # 1. Either rebuild the merged table or reuse it
+    # ==================================================
+
+    if rebuild_merged:
+        merged, _, _ = merge_data.build_cleaned_dataset(save_intermediate=save)
+    else:
+        merged = load_merged_data()
+
+    # ==================================================
+    # 2. Create lagged predictors for the modeling stage
+    # ==================================================
+
+    lagged = build_lagged_dataset(merged, lag_days=lag_days)
+    if save:
+        save_lagged_dataset(lagged)
+    return lagged
+
+
+def main() -> None:
+    """CLI entry point used by the project pipeline."""
+    parser = argparse.ArgumentParser(description="Build lagged features and optional descriptive plots.")
+    parser.add_argument(
+        "--no-rebuild-merged",
+        action="store_true",
+        help="Reuse data_cleaned.parquet instead of rebuilding the merged dataset first.",
+    )
+    parser.add_argument("--lag-days", type=int, default=cfg.DEFAULT_LAG_DAYS)
+    parser.add_argument("--show-boxplot", action="store_true")
+    parser.add_argument("--show-corrplot", action="store_true")
+    parser.add_argument("--correlation-threshold", type=float, default=0.2)
+    args = parser.parse_args()
+
+    lagged = prepare_processed_dataset(
+        rebuild_merged=not args.no_rebuild_merged,
+        save=True,
+        lag_days=args.lag_days,
+    )
+
+    # ==================================================
+    # 3. Optionally display descriptive plots
+    # ==================================================
+
+    base_df = load_merged_data()
+    if args.show_boxplot:
+        boxplot(base_df)
+    if args.show_corrplot:
+        corrplot(lagged, args.correlation_threshold)
+
+    print(f"Saved: {cfg.DATA_PROCESSED} | rows={len(lagged)} | columns={len(lagged.columns)}")
+
+
+if __name__ == "__main__":
+    main()

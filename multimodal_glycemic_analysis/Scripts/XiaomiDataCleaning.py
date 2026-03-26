@@ -1,236 +1,258 @@
-import pandas as pd
+from __future__ import annotations
+
+"""
+This script converts the raw Xiaomi wearable export into a clean daily table.
+
+Its role in the project is to transform heterogeneous activity and sleep data
+into structured predictors that can later be merged with glycemic information.
+
+The workflow is:
+1. load raw Xiaomi fitness and training exports,
+2. clean timestamps and remove non-informative records,
+3. reshape the daily export from long format to wide format,
+4. unpack JSON-like payloads for calories, heart rate, sleep, and steps,
+5. build a daily training indicator,
+6. save the result as a daily parquet dataset.
+
+This file is meant to be readable as an ETL step inside the broader pipeline.
+"""
+
+import argparse
 import json
+from pathlib import Path
+
+import pandas as pd
+
 import config as cfg
 
-def main():
-    # importo il file con gli aggregati giornalieri--------------------------------------------------------------------------
-        
-    xiaomi_path = cfg.XIAOMI_DIR / cfg.XIAOMI_FITNESS_FILE
-    df_x = pd.read_csv(xiaomi_path)
-        
-    #converto date e ore in modo utilizzabile-------------------------------------------------------------------------- 
-        
-    df_x["Time"] = (
-        pd.to_datetime(df_x["Time"], unit="s", utc=True).dt.tz_convert("Europe/Rome")
-            
-            )
-    
-    #droppo righe inutili--------------------------------------------------------------------------
-        
-    df_x = df_x[~df_x["Key"].isin(                          #~ è negazione
-        ["stress", "goal", "valid_stand", "spo2", "intensity"]
-        )]
-    
-    df_x = df_x[df_x["Tag"] != "daily_mark"]
-    
-    #droppo colonne inutili--------------------------------------------------------------------------
-        
-    df_x.drop(columns = ["Uid","Sid","Tag","UpdateTime"], inplace = True)
-        
-    #elimino date fuori range obiettivo--------------------------------------------------------------------------
-    
-    start = pd.Timestamp("2025-09-01", tz="Europe/Rome")
-    end   = pd.Timestamp("2026-02-01", tz="Europe/Rome")
-        
-    df_x = df_x[(df_x["Time"] >= start) & (df_x["Time"] < end)].copy()
-        
-    
-    #passo a formato wide da long--------------------------------------------------------------------------
-    
-    # 1) crea la colonna Date (solo giorno, senza ora)
+# ==================================================
+# Static cleaning rules
+# ==================================================
+
+EXCLUDED_KEYS = {"stress", "goal", "valid_stand", "spo2", "intensity"}
+HEART_RATE_DROP_COLUMNS = [
+    "latest_hr.time",
+    "latest_hr.bpm",
+    "anaerobic_hr_zone_duration",
+    "fat_burning_hr_zone_duration",
+    "aerobic_hr_zone_duration",
+    "warm_up_hr_zone_duration",
+    "extreme_hr_zone_duration",
+    "abnormal_hr_count",
+]
+SLEEP_DROP_COLUMNS = [
+    "total_snore_disturb",
+    "breath_quality",
+    "day_sleep_evaluation",
+    "avg_spo2",
+    "sleep_trace_duration",
+    "sleep_algorithm_version",
+    "total_body_move",
+    "total_turn_over",
+    "sleep_manually_duration",
+    "total_snore",
+]
+
+
+def parse_bound(value: str | None) -> pd.Timestamp | None:
+    """Convert an optional CLI date to a timezone-aware timestamp."""
+    if value is None:
+        return None
+
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize(cfg.TIMEZONE)
+    return ts.tz_convert(cfg.TIMEZONE)
+
+
+def clean_xiaomi_data(
+    fitness_path: Path | None = None,
+    training_path: Path | None = None,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Build a clean daily Xiaomi dataset from the raw exports."""
+
+    fitness_path = fitness_path or (cfg.XIAOMI_DIR / cfg.XIAOMI_FITNESS_FILE)
+    training_path = training_path or (cfg.XIAOMI_DIR / cfg.XIAOMI_TRAINING_FILE)
+
+    # ==================================================
+    # 1. Load raw Xiaomi files
+    # ==================================================
+
+    df_x = pd.read_csv(cfg.require_existing_path(fitness_path))
+    df_x["Time"] = pd.to_datetime(df_x["Time"], unit="s", utc=True).dt.tz_convert(cfg.TIMEZONE)
+
+    df_train = pd.read_csv(cfg.require_existing_path(training_path), usecols=["Time"])
+    df_train["Time"] = pd.to_datetime(df_train["Time"], unit="s", utc=True).dt.tz_convert(cfg.TIMEZONE)
+
+    # ==================================================
+    # 2. Remove unwanted rows and restrict the time window
+    # ==================================================
+
+    df_x = df_x.loc[~df_x["Key"].isin(EXCLUDED_KEYS)].copy()
+    df_x = df_x.loc[df_x["Tag"] != "daily_mark"].copy()
+    df_x = df_x.drop(columns=["Uid", "Sid", "Tag", "UpdateTime"], errors="ignore")
+
+    if start is not None:
+        df_x = df_x.loc[df_x["Time"] >= start].copy()
+        df_train = df_train.loc[df_train["Time"] >= start].copy()
+    if end is not None:
+        df_x = df_x.loc[df_x["Time"] < end].copy()
+        df_train = df_train.loc[df_train["Time"] < end].copy()
+
+    # ==================================================
+    # 3. Convert the long daily export into a wide table
+    # ==================================================
+
     df_x["Date"] = df_x["Time"].dt.date
-    
-    
-    # 2) pivot: una colonna per ogni Key
-    df_wide = (
-        df_x.pivot_table(
-            index="Date",
-            columns="Key",
-            values="Value",
-            aggfunc="first"   # se per lo stesso giorno/key hai più righe, prende la prima
+    duplicates = df_x.groupby(["Date", "Key"]).size()
+    duplicated_keys = duplicates.loc[duplicates > 1]
+    if not duplicated_keys.empty:
+        sample = duplicated_keys.head(5).to_dict()
+        raise ValueError(f"Found duplicate Xiaomi daily aggregates: {sample}")
+
+    df_wide = df_x.pivot(index="Date", columns="Key", values="Value").sort_index()
+
+    # ==================================================
+    # 4. Expand the calories payload
+    # ==================================================
+
+    if "calories" in df_wide.columns:
+        df_wide["calories"] = df_wide["calories"].map(
+            lambda value: json.loads(value)["calories"] if pd.notna(value) else pd.NA
         )
-        .reset_index()
-    )
-    
-    df_wide = df_wide.set_index("Date") #imposto la data come indice di riga
-    
-    #pulisco i dati di calories--------------------------------------------------------------------------
-    
-    df_wide["calories"] = df_wide["calories"].apply(
-        lambda x: json.loads(x)["calories"] if pd.notna(x) else pd.NA
-    )  # apply applica ad ogni riga, lamda x è tipo funzione di x, x = stringa JSON → json.loads(x) = dizionario → ["calories"] = valore numerico
-    
-    #pulisco i dati di heart_rate--------------------------------------------------------------------------
-    
-    hr_notna = df_wide["heart_rate"].dropna()
-    hr_parsed = hr_notna.apply(json.loads) #passo da striga a dizionario python
-    hr_df = pd.json_normalize(hr_parsed) #trasformo gli elemtni del dizionario in colonne
-    hr_df.index = hr_notna.index   #  reimposta l'indice Date
-    
-    # rimuovi colonne inutili 
-    drop_cols = [
-        "latest_hr.time",
-        "latest_hr.bpm",
-        "anaerobic_hr_zone_duration",
-        "fat_burning_hr_zone_duration",
-        "aerobic_hr_zone_duration",
-        "warm_up_hr_zone_duration",
-        "extreme_hr_zone_duration",
-        "abnormal_hr_count"
-    ]
-    hr_df = hr_df.drop(columns=[c for c in drop_cols if c in hr_df.columns])
-    
-    # rinomine (solo se esistono)
-    rename_map = {"avg_rhr": "avg_rest_hr"}
-    hr_df = hr_df.rename(columns={k: v for k, v in rename_map.items() if k in hr_df.columns})
-    
-    ## hr_df = hr_df.add_prefix("hr_")  
-    
-    df_wide = df_wide.join(hr_df)          # join su Date (indice)
-    df_wide = df_wide.drop(columns=["heart_rate"])
-    
-    
-    #pulisco i dati di sleep--------------------------------------------------------------------------
-        
-    sleep_notna = df_wide["sleep"].dropna()
-    sl_parsed = sleep_notna.apply(json.loads)
-    
-    sl_df = pd.json_normalize(sl_parsed)
-    sl_df.index = sleep_notna.index  # indice = Date, join sicuro
-    
-    def extract_bed_wake(seg_list):
-        # ritorna solo bedtime (min) e wake_up_time (max)
-        if not isinstance(seg_list, list) or len(seg_list) == 0:
-            return pd.Series({"sleep_seg_bedtime": pd.NA})
-    
-        seg = pd.DataFrame(seg_list)
-        bedtime = seg["bedtime"].min() if "bedtime" in seg.columns else pd.NA
-        return pd.Series({"sleep_seg_bedtime": bedtime})
-    
-    # estrai SOLO 2 colonne 
-    seg_cols = sl_df["segment_details"].apply(extract_bed_wake)
-    
-    # converto subito a datetime Italia
-    seg_cols["sleep_seg_bedtime_dt"] = pd.to_datetime(seg_cols["sleep_seg_bedtime"], unit="s", utc=True).dt.tz_convert("Europe/Rome")
-    
-    # tengo solo le due datetime
-    seg_cols = seg_cols[["sleep_seg_bedtime_dt"]]
-    
-    # rimuovo segment_details dal sleep base e aggiungo le due nuove colonne
-    sl_df = sl_df.drop(columns=["segment_details"])
-    sl_df = sl_df.join(seg_cols)
-    
-    # qui droppi le altre colonne inutili
-    sl_drop_cols = [
-        'total_snore_disturb','breath_quality','day_sleep_evaluation','avg_spo2',
-        'sleep_trace_duration','sleep_algorithm_version','total_body_move',
-        'total_turn_over','sleep_manually_duration','total_snore'
-    ]
-    sl_df = sl_df.drop(columns=[c for c in sl_drop_cols if c in sl_df.columns])
-    
-    
-    #calcolo manualmente l'orario di risveglio
-    sl_df["wake_up_dt_calc"] = (
-        sl_df["sleep_seg_bedtime_dt"]
-        + pd.to_timedelta(sl_df["total_duration"], unit="m")
-    )
-    
-    rename_map = {"total_long_duration": "long_duration",
-                  "sleep_deep_duration": "deep_duration",
-                  "sleep_nap_duration": "nap_duration",
-                  "sleep_rem_duration": "rem_duration",
-                  "total_duration": "tot_duration",
-                  "sleep_score": "score",
-                  "sleep_awake_duration": "awake_duration",
-                  "sleep_light_duration": "light_duration",
-                  "long_sleep_evaluation": "long_score",
-                  "sleep_seg_bedtime_dt": "bedtime",
-                  "wake_up_dt_calc": "wakeup_time"
-                  
-                  
-                  }
-    sl_df = sl_df.rename(columns={k: v for k, v in rename_map.items() if k in sl_df.columns})
-    
-    #trasformo l'orario di bedtime e di wakeup in minuti dalla mezzanotte con correzione per orari prima di mezzanotte
-    
-    
-    sl_df["bedtime_mfm"] = (
-        sl_df["bedtime"].dt.hour*60
-        + sl_df["bedtime"].dt.minute
-        + sl_df["bedtime"].dt.second/60
-    )
 
-    sl_df["wakeup_time_mfm"] = (
-        sl_df["wakeup_time"].dt.hour*60
-        + sl_df["wakeup_time"].dt.minute
-        + sl_df["wakeup_time"].dt.second/60
-    )
+    # ==================================================
+    # 5. Expand the heart-rate payload
+    # ==================================================
 
-    sl_df["bedtime_mfm"] = sl_df["bedtime_mfm"].where(
-        sl_df["bedtime_mfm"] <= 420,
-        sl_df["bedtime_mfm"] - 24*60
-    )
-    
-    sl_df = sl_df.drop(columns=["bedtime","wakeup_time"])
-    
-    # prefisso e join finale
-    sl_df = sl_df.add_prefix("sl_")
-    df_wide = df_wide.join(sl_df)
-    df_wide = df_wide.drop(columns=["sleep"])
-    
-    
-    #pulisco i dati sui passi--------------------------------------------------------------------------
-    
-    steps_notna = df_wide["steps"].dropna()
-    ste_parsed = steps_notna.apply(json.loads)
-    ste_df = pd.json_normalize(ste_parsed)
-    ste_df.index = steps_notna.index
-    
-    ste_df = ste_df["steps"]
-    
-    
-    df_wide = df_wide.drop(columns=["steps"])
-    df_wide = df_wide.join(ste_df)
-    
-    
-    #importo le date degli allenamenti---------------------------------------------------------------------
-    
-    
-    train_path = cfg.XIAOMI_DIR / cfg.XIAOMI_TRAINING_FILE
-    df_train = pd.read_csv(train_path)
-    
-    # tieni solo le colonne utili
-    df_train = df_train[["Time"]]
-    
-    # converto Time in datetime con tz
-    df_train["Time"] = pd.to_datetime(df_train["Time"], unit="s", utc=True).dt.tz_convert("Europe/Rome")
-    
-    # creo Date giornaliera 
+    if "heart_rate" in df_wide.columns:
+        hr_source = df_wide["heart_rate"].dropna().map(json.loads)
+        hr_df = pd.json_normalize(hr_source)
+        hr_df.index = hr_source.index
+        hr_df = hr_df.drop(columns=[col for col in HEART_RATE_DROP_COLUMNS if col in hr_df.columns])
+        hr_df = hr_df.rename(columns={"avg_rhr": "avg_rest_hr"})
+        df_wide = df_wide.join(hr_df).drop(columns=["heart_rate"])
+
+    # ==================================================
+    # 6. Expand the sleep payload
+    # ==================================================
+
+    if "sleep" in df_wide.columns:
+        sleep_source = df_wide["sleep"].dropna().map(json.loads)
+        sl_df = pd.json_normalize(sleep_source)
+        sl_df.index = sleep_source.index
+
+        if "segment_details" in sl_df.columns:
+            bedtime_rows: list[dict[str, object]] = []
+            for row_date, segment_details in sl_df["segment_details"].items():
+                bedtime = pd.NA
+                if isinstance(segment_details, list) and segment_details:
+                    seg = pd.DataFrame(segment_details)
+                    if "bedtime" in seg.columns:
+                        bedtime = seg["bedtime"].min()
+                bedtime_rows.append({"Date": row_date, "sleep_seg_bedtime": bedtime})
+
+            seg_cols = pd.DataFrame(bedtime_rows).set_index("Date")
+            seg_cols["sleep_seg_bedtime_dt"] = pd.to_datetime(
+                seg_cols["sleep_seg_bedtime"], unit="s", utc=True
+            ).dt.tz_convert(cfg.TIMEZONE)
+            sl_df = sl_df.drop(columns=["segment_details"]).join(seg_cols[["sleep_seg_bedtime_dt"]])
+
+        sl_df = sl_df.drop(columns=[col for col in SLEEP_DROP_COLUMNS if col in sl_df.columns])
+        sl_df["wake_up_dt_calc"] = sl_df["sleep_seg_bedtime_dt"] + pd.to_timedelta(
+            sl_df["total_duration"], unit="m"
+        )
+        sl_df = sl_df.rename(
+            columns={
+                "total_long_duration": "long_duration",
+                "sleep_deep_duration": "deep_duration",
+                "sleep_nap_duration": "nap_duration",
+                "sleep_rem_duration": "rem_duration",
+                "total_duration": "tot_duration",
+                "sleep_score": "score",
+                "sleep_awake_duration": "awake_duration",
+                "sleep_light_duration": "light_duration",
+                "long_sleep_evaluation": "long_score",
+                "sleep_seg_bedtime_dt": "bedtime",
+                "wake_up_dt_calc": "wakeup_time",
+            }
+        )
+
+        sl_df["bedtime_mfm"] = (
+            sl_df["bedtime"].dt.hour * 60
+            + sl_df["bedtime"].dt.minute
+            + sl_df["bedtime"].dt.second / 60
+        )
+        sl_df["wakeup_time_mfm"] = (
+            sl_df["wakeup_time"].dt.hour * 60
+            + sl_df["wakeup_time"].dt.minute
+            + sl_df["wakeup_time"].dt.second / 60
+        )
+
+        # Bedtime is moved to the previous day when it occurs before 7:00 AM.
+        sl_df["bedtime_mfm"] = sl_df["bedtime_mfm"].where(
+            sl_df["bedtime_mfm"] <= 420,
+            sl_df["bedtime_mfm"] - 24 * 60,
+        )
+
+        sl_df = sl_df.drop(columns=["bedtime", "wakeup_time"], errors="ignore").add_prefix("sl_")
+        df_wide = df_wide.join(sl_df).drop(columns=["sleep"])
+
+    # ==================================================
+    # 7. Expand the steps payload
+    # ==================================================
+
+    if "steps" in df_wide.columns:
+        step_source = df_wide["steps"].dropna().map(json.loads)
+        step_df = pd.json_normalize(step_source)
+        step_df.index = step_source.index
+        if "steps" in step_df.columns:
+            df_wide = df_wide.drop(columns=["steps"]).join(step_df["steps"])
+
+    # ==================================================
+    # 8. Add the daily training indicator
+    # ==================================================
+
     df_train["Date"] = df_train["Time"].dt.date
-    
-    # colonna booleana "training" per giorno:
     df_train["training"] = 1
-    
-    # aggrego per giorno 
     df_train_day = df_train.groupby("Date", as_index=True)["training"].max().to_frame()
-    
-    # join su Date 
-    df_wide = df_wide.join(df_train_day)
-    
+
+    df_wide = df_wide.join(df_train_day, how="left")
     df_wide["training"] = df_wide["training"].fillna(0).astype(int)
-    
-    #export dati puliti 
-    
-    if True:
-        try:
-            df_export = df_wide.copy()
-            df_export.index = pd.to_datetime(df_export.index)
-            pq_path = cfg.XIAOMI_DATA_CLEANED
-            df_export.to_parquet(pq_path, engine="pyarrow", index=True)
-            print("Saved:", pq_path)
-        except Exception as e:
-            print("Parquet export failed:", repr(e))
 
-if __name__ == "__main__": main()
+    # ==================================================
+    # 9. Final index normalization
+    # ==================================================
+
+    df_wide.index = pd.to_datetime(df_wide.index).normalize()
+    return df_wide.sort_index()
 
 
+def save_xiaomi_data(df: pd.DataFrame, output_path: Path | None = None) -> Path:
+    """Save the cleaned Xiaomi dataset."""
+    output_path = output_path or cfg.XIAOMI_DATA_CLEANED
+    cfg.ensure_processed_dir()
+    df.to_parquet(output_path, engine="pyarrow", index=True)
+    return output_path
+
+
+def main() -> None:
+    """CLI entry point used by the project pipeline."""
+    parser = argparse.ArgumentParser(description="Clean Xiaomi daily aggregates.")
+    parser.add_argument("--start-date", dest="start_date")
+    parser.add_argument("--end-date", dest="end_date")
+    parser.add_argument("--output", type=Path, default=cfg.XIAOMI_DATA_CLEANED)
+    args = parser.parse_args()
+
+    df = clean_xiaomi_data(
+        start=parse_bound(args.start_date),
+        end=parse_bound(args.end_date),
+    )
+    saved_path = save_xiaomi_data(df, args.output)
+    print(f"Saved: {saved_path} | rows={len(df)} | columns={len(df.columns)}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,6 @@
+task,model,quantile,metric,cv_score,holdout_score,best_params,n_train,n_holdout
+regression,pcr_ridge,,r2,0.03282515109906301,-0.4135793185954353,"{""model__alpha"": 18.73817422860383, ""pca__n_components"": 9}",245,14
+regression,elastic_net,,r2,0.02440641278897262,-0.28061001780525596,"{""model__alpha"": 0.46415888336127775, ""model__l1_ratio"": 0.1}",245,14
+regression,pls,,r2,0.008326767961210546,-0.4985980481837231,"{""model__n_components"": 3}",245,14
+regression,lasso,,r2,-0.004539844148674588,-0.4118906595950793,"{""model__alpha"": 0.06951927961775606}",245,14
+regression,hist_gb,,r2,-0.08762188713113224,-0.24739317212158785,"{""model__learning_rate"": 0.03, ""model__max_depth"": 2, ""model__max_leaf_nodes"": 7, ""model__min_samples_leaf"": 20}",245,14
