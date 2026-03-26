@@ -1,5 +1,17 @@
 from __future__ import annotations
 
+"""
+Central configuration file for paths and shared project settings.
+
+This file stores:
+- where raw data exports are located,
+- where processed artifacts are written,
+- default modeling settings such as lag depth and target name.
+
+Keeping these constants in one place makes the rest of the code easier to read
+and simplifies small configuration changes across the project.
+"""
+
 from pathlib import Path
 
 # === BASE PROJECT DIR ===

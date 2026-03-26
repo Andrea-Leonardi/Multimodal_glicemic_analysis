@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+"""
+This script prepares the merged daily dataset for modeling.
+
+Its main role is feature engineering: it creates lagged predictors so that the
+models can use recent history rather than same-day information only. The file
+also contains optional descriptive plots for quick exploratory analysis.
+
+The workflow is:
+1. load or rebuild the merged daily dataset,
+2. create lagged versions of the selected variables,
+3. save the processed modeling table,
+4. optionally display boxplots and correlation heatmaps.
+"""
+
 import argparse
 from pathlib import Path
 
@@ -13,10 +27,12 @@ import MergeData as merge_data
 
 
 def load_merged_data(path: Path | None = None) -> pd.DataFrame:
+    """Load the merged daily dataset from disk."""
     return pd.read_parquet(cfg.require_existing_path(path or cfg.DATA_CLEANED)).sort_index()
 
 
 def boxplot(df: pd.DataFrame) -> None:
+    """Show simple boxplots for the numeric columns."""
     step = 6
     numeric_df = df.select_dtypes("number")
     for start in range(0, numeric_df.shape[1], step):
@@ -35,6 +51,7 @@ def boxplot(df: pd.DataFrame) -> None:
 
 
 def corrplot(df: pd.DataFrame, threshold: float) -> None:
+    """Show a Spearman correlation heatmap with optional annotation threshold."""
     corr = df.select_dtypes("number").corr(method="spearman")
     annot = corr.round(2).astype(str)
     annot[np.abs(corr) < threshold] = ""
@@ -52,6 +69,7 @@ def build_lagged_dataset(
     lag_columns: list[str] | None = None,
     include_day_index: bool = True,
 ) -> pd.DataFrame:
+    """Create lagged predictors from the selected daily columns."""
     if lag_days < 1:
         raise ValueError("lag_days must be at least 1.")
 
@@ -79,6 +97,7 @@ def save_lagged_dataset(
     parquet_path: Path | None = None,
     csv_path: Path | None = None,
 ) -> tuple[Path, Path]:
+    """Persist the lagged dataset used by the modeling stage."""
     parquet_path = parquet_path or cfg.DATA_PROCESSED
     csv_path = csv_path or cfg.DATA_PROCESSED_CSV
     cfg.ensure_processed_dir()
@@ -98,10 +117,20 @@ def prepare_processed_dataset(
     save: bool = True,
     lag_days: int = cfg.DEFAULT_LAG_DAYS,
 ) -> pd.DataFrame:
+    """Build or reload the merged dataset and then create lagged features."""
+
+    # ==================================================
+    # 1. Either rebuild the merged table or reuse it
+    # ==================================================
+
     if rebuild_merged:
         merged, _, _ = merge_data.build_cleaned_dataset(save_intermediate=save)
     else:
         merged = load_merged_data()
+
+    # ==================================================
+    # 2. Create lagged predictors for the modeling stage
+    # ==================================================
 
     lagged = build_lagged_dataset(merged, lag_days=lag_days)
     if save:
@@ -110,6 +139,7 @@ def prepare_processed_dataset(
 
 
 def main() -> None:
+    """CLI entry point used by the project pipeline."""
     parser = argparse.ArgumentParser(description="Build lagged features and optional descriptive plots.")
     parser.add_argument(
         "--no-rebuild-merged",
@@ -127,6 +157,10 @@ def main() -> None:
         save=True,
         lag_days=args.lag_days,
     )
+
+    # ==================================================
+    # 3. Optionally display descriptive plots
+    # ==================================================
 
     base_df = load_merged_data()
     if args.show_boxplot:

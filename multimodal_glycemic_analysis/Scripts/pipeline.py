@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+"""
+This script is the main command-line entry point of the project.
+
+It does not contain the analytical logic itself. Instead, it orchestrates the
+different stages of the workflow so the user can run the project step by step
+or end to end from one place.
+
+Available stages:
+1. clean raw data and build the merged daily dataset,
+2. create lagged features for modeling,
+3. run regression and classification benchmarks,
+4. execute the full pipeline in sequence.
+"""
+
 import argparse
 import sys
 
@@ -9,6 +23,7 @@ import Processing_and_descriptive as processing
 
 
 def main() -> None:
+    """CLI entry point that orchestrates the full project workflow."""
     parser = argparse.ArgumentParser(description="Run the glycemic analysis pipeline.")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -50,10 +65,18 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # ==================================================
+    # 1. Cleaning and merge only
+    # ==================================================
+
     if args.command == "clean":
         merged, _, _ = merge_data.build_cleaned_dataset(save_intermediate=True)
         print(f"Built merged dataset | rows={len(merged)} | columns={len(merged.columns)}")
         return
+
+    # ==================================================
+    # 2. Feature engineering only
+    # ==================================================
 
     if args.command == "features":
         lagged = processing.prepare_processed_dataset(
@@ -63,6 +86,10 @@ def main() -> None:
         )
         print(f"Built lagged dataset | rows={len(lagged)} | columns={len(lagged.columns)}")
         return
+
+    # ==================================================
+    # 3. Modeling only
+    # ==================================================
 
     if args.command == "train":
         results = ml.run_modeling(
@@ -74,6 +101,10 @@ def main() -> None:
         print(ml.format_results(results))
         print(f"\nSaved CSV: {ml.cfg.ML_RESULTS}")
         return
+
+    # ==================================================
+    # 4. Full pipeline: clean -> features -> modeling
+    # ==================================================
 
     merge_data.build_cleaned_dataset(save_intermediate=True)
     processing.prepare_processed_dataset(rebuild_merged=False, save=True, lag_days=args.lag_days)
