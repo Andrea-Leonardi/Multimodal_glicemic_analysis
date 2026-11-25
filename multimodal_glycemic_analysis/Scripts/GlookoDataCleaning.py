@@ -282,19 +282,19 @@ def clean_glooko_data(
     base_200 = (df_carb["carb"] <= 40) & (df_carb["glicemia"] > 200)
 
     time_1530_1930 = df_carb["ora"].dt.time.between(
-        pd.to_datetime("15:30").time(),
-        pd.to_datetime("19:30").time(),
+        pd.to_datetime("15:30:00").time(),
+        pd.to_datetime("19:30:00").time(),
     )
     time_2230_2359 = df_carb["ora"].dt.time.between(
-        pd.to_datetime("22:30").time(),
-        pd.to_datetime("23:59").time(),
+        pd.to_datetime("22:30:00").time(),
+        pd.to_datetime("23:59:59").time(),
     )
-    time_0001_0500 = df_carb["ora"].dt.time.between(
-        pd.to_datetime("00:01").time(),
-        pd.to_datetime("05:00").time(),
+    time_0000_0500 = df_carb["ora"].dt.time.between(
+        pd.to_datetime("00:00:00").time(),
+        pd.to_datetime("05:00:00").time(),
     )
 
-    time_mask = time_1530_1930 | time_2230_2359 | time_0001_0500
+    time_mask = time_1530_1930 | time_2230_2359 | time_0000_0500
     df_carb["is_correction"] = base_240 | (base_200 & time_mask)
 
     df_carb = df_carb.loc[~df_carb["is_correction"], ["carb"]].copy()

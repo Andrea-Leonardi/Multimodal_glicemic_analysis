@@ -191,7 +191,7 @@ def clean_xiaomi_data(
             + sl_df["wakeup_time"].dt.second / 60
         )
 
-        # Bedtime is moved to the previous day when it occurs before 7:00 AM.
+        # Express bedtime as minutes from midnight (negative = before midnight, positive = after midnight).
         sl_df["bedtime_mfm"] = sl_df["bedtime_mfm"].where(
             sl_df["bedtime_mfm"] <= 420,
             sl_df["bedtime_mfm"] - 24 * 60,

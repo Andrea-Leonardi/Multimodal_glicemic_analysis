@@ -1,267 +1,146 @@
 # Multimodal Glycemic Analysis
 
-## Overview
+An end-to-end longitudinal data science pipeline that integrates **continuous glucose monitoring (CGM), insulin, and carbohydrate logs (Glooko)** with **wearable sleep, heart-rate, activity, and workout telemetry (Xiaomi MiFitness)** to analyze and forecast daily hyperglycemic risk.
 
-This project explores whether daily glycemic outcomes can be explained and partially predicted by combining glucose, insulin, carbohydrate intake, sleep, heart-rate, step count, calories, and training data from multiple personal health devices.
+---
 
-The repository is built around a real-world self-tracking dataset collected from:
+## Key Highlights
 
-- Glooko exports containing CGM, insulin, alarms, and meal-related information
-- Xiaomi wearable exports containing sleep, activity, heart-rate, calories, and workout signals
+- **Multimodal ETL on real-world health exports**: Parses heterogeneous vendor CSVs and nested JSON payloads, normalizes timezones (`Europe/Rome`), computes time-weighted CGM metrics (`mean`, `SD`, `CV`, `TIR`, `TAR`, hyperglycemic `AUC rate`), and filters insulin correction boluses from meal carbohydrates.
+- **Contiguous multimodal window detection**: Automatically identifies and excludes a 3-month summer wearable recording gap (`Jun–Aug 2025`), preserving >93% wearable and sleep feature availability across the continuous multimodal overlap (`2025-09-09` → `2026-02-07`, 149 modeling days).
+- **Strict leak-free temporal feature engineering**: Builds 68 predictors using only past information (`t-1`, `t-2` lags, shifted 3-day/7-day rolling statistics, acute 7-day baseline deltas, sleep missingness flags, and cyclical day-of-week features), verified by automated anti-leakage unit tests.
+- **Rigorous time-aware benchmarking & ablation**: Evaluates regression (`R²`, `MAE`, `RMSE`) and binary high-risk classification (`ROC-AUC`, `PR-AUC`, `Brier`) with `TimeSeriesSplit` CV and a 28-day chronological holdout against explicit **Mean/Prior** and **Persistence (`y_{t-1}`)** baselines, plus a controlled **Glooko-only vs. Multimodal** ablation study.
+- **Interpretability & automated reporting**: Exports holdout permutation importance and generates 4 publication-ready figures via a single CLI command.
 
-The main goal is to turn heterogeneous raw sensor exports into a clean daily analytical dataset and benchmark a set of statistical and machine learning models for glycemic-risk forecasting.
+---
 
-## Why This Project Matters
+## Longitudinal Overview & Multimodal Window
 
-This is a compact end-to-end data science project that combines:
+![Longitudinal CGM Trajectory & Contiguous Multimodal Window](reports/figures/01_glycemic_overview.png)
 
-- multimodal health data integration
-- raw CSV and JSON-like payload cleaning
-- time-aware feature engineering
-- reproducible modeling workflows
-- interpretable terminal reporting
+The raw merged timeline spans **262 days** (`2025-05-23` → `2026-02-08`), but Xiaomi wearable recording was sparse during summer 2025 before becoming continuous in September 2025. Restricting modeling to the contiguous multimodal window prevents wearable features from being silently dropped by availability filters and ensures fair comparison between `glooko_only` (41 features) and `multimodal` (68 features) models.
 
-It is designed as both a personal research project and a portfolio-ready example of applied machine learning on longitudinal physiological data.
+---
 
-## Problem Statement
+## Exploratory Signal: Lagged Predictors vs. Next-Day Outcomes
 
-The project asks a practical question:
+![Spearman Correlation Heatmap](reports/figures/02_multimodal_correlations.png)
 
-Can daily glycemic quality be forecast from recent behavioral and physiological patterns?
+Notable next-day Spearman associations on the contiguous multimodal window:
+- **Previous-day carbohydrates (`carb_daily_lag1`)** correlate positively with next-day hyperglycemic AUC rate (`ρ = +0.23`).
+- **7-day rolling step volume (`steps_roll7_mean`)** correlates negatively with glucose variability (`ρ = -0.22`), while previous-day bolus insulin (`ins_bolo_tot_lag1`) correlates positively with Time in Range (`ρ = +0.22`).
+- **Weekend indicator (`cal_is_weekend`)** shows elevated glucose variability (`ρ = +0.19`) and hyperglycemic AUC rate (`ρ = +0.14`).
 
-More specifically, the pipeline builds daily targets such as:
+---
 
-- time-weighted glucose mean
-- glucose variability
-- time in range
-- time above range
-- rate of area above a hyperglycemic threshold
+## Modeling Strategy & Benchmark Results
 
-These glycemic indicators are then paired with lagged features derived from recent days of:
+All models are evaluated on the **contiguous multimodal window** (`121` training days, `28` chronological holdout days, target = `bg_auc_above_limit_rate`) using `TimeSeriesSplit` (5 folds) for hyperparameter tuning.
 
-- sleep duration and sleep score
-- bedtime timing
-- physical activity and training
-- carbohydrate intake
-- insulin-related events
+### 1. Regression Benchmark (Multimodal — 68 features)
 
-## Dataset and Modalities
+| Model | CV R² | Holdout R² | CV MAE | Holdout MAE | Holdout RMSE |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Elastic Net** | -0.026 | **-0.045** | 2.342 | **1.918** | **2.400** |
+| **Random Forest** | **-0.003** | -0.259 | **2.291** | 2.100 | 2.635 |
+| Lasso | -0.059 | -0.072 | 2.416 | 2.022 | 2.431 |
+| Ridge | -0.010 | -0.398 | 2.327 | 2.221 | 2.776 |
+| PCR + Ridge | -0.036 | -0.201 | 2.412 | 2.135 | 2.573 |
+| *Baseline: Mean* | -0.065 | -0.072 | 2.420 | 2.022 | 2.431 |
+| *Baseline: Persistence (`y_{t-1}`)* | -1.072 | -0.805 | 3.373 | 2.466 | 3.155 |
 
-The repository contains personal data exports used for experimentation and model development.
+### 2. High-Risk Classification & Modality Ablation (`q = 0.65`, cutoff = `11.35`)
 
-### Glooko-derived signals
+| Model | Multimodal CV AUC | Glooko-Only CV AUC | Multimodal Holdout AUC | Multimodal Holdout PR-AUC |
+| :--- | :---: | :---: | :---: | :---: |
+| **HistGradientBoosting** | **0.667** | 0.632 | 0.427 | 0.325 |
+| **SVM (RBF)** | 0.656 | 0.702 | **0.509** | **0.450** |
+| SVM (Linear) | 0.653 | 0.746 | 0.439 | 0.339 |
+| Logistic Regression | 0.648 | **0.756** | 0.427 | 0.417 |
+| Logistic Elastic Net | 0.635 | 0.737 | 0.439 | 0.365 |
+| *Baseline: Persistence* | 0.551 | 0.551 | 0.526 | 0.385 |
+| *Baseline: Prior* | 0.500 | 0.500 | 0.500 | 0.321 |
 
-- CGM time series
-- insulin totals
-- bolus-related meal entries
-- cartridge replacement events
-- alarm and event logs
+![Model Benchmark and Modality Ablation](reports/figures/03_model_benchmark_ablation.png)
 
-### Xiaomi-derived signals
+### Key Scientific Takeaways
 
-- daily calories
-- daily steps
-- heart-rate summaries
-- sleep structure and sleep timing
-- training session indicators
+1. **Modest but real signal under high daily noise**: Strongly regularized models (`Elastic Net` in regression: `1.918` vs `2.022` mean baseline MAE; `HistGradientBoosting` and `SVM-RBF` in CV classification: `0.667` / `0.656` vs `0.551` persistence AUC) outperform naive baselines in cross-validation, while unregularized/flexible models overfit.
+2. **Curse of dimensionality in small-N multimodal learning**: Adding 27 wearable features (41 → 68) helps tree-based classification (`HistGB` CV AUC `0.632` → `0.667`) and surfaces sleep/activity predictors in permutation importance, whereas linear classifiers perform stronger in CV with the leaner `glooko_only` set (`Logistic` CV AUC `0.756`) due to `n_train = 121`.
+3. **Non-stationarity on the final 28-day holdout**: Holdout classification AUC drops toward baseline despite strong CV AUC, reflecting physiological and behavioral drift across winter months — motivating rolling retraining and intraday (post-prandial) modeling as next steps.
 
-## Pipeline Architecture
+---
 
-The workflow is intentionally split into explicit stages.
+## Interpretability & Holdout ROC
 
-### 1. Cleaning and harmonization
+![Permutation Importance and Holdout ROC](reports/figures/04_feature_importance_and_roc.png)
 
-The cleaning scripts parse raw vendor exports, normalize timestamps, convert numeric fields, unpack JSON-encoded payloads, and aggregate each modality to a daily level.
+Holdout permutation importance on the multimodal `Random Forest` highlights both **Glooko** (`carb_daily_delta_7d`, `bg_auc_above_limit_rate_roll7_mean`, `bg_auc_above_limit_rate_lag2`) and **Xiaomi** (`sl_score_delta_7d`, `steps_roll7_mean`, `avg_rest_hr_lag2`, `sl_score_roll3_mean`) signals among the top contributors.
 
-Relevant scripts:
+---
 
-- `multimodal_glycemic_analysis/Scripts/XiaomiDataCleaning.py`
-- `multimodal_glycemic_analysis/Scripts/GlookoDataCleaning.py`
-
-### 2. Dataset merge
-
-The cleaned daily Xiaomi and Glooko tables are aligned on a normalized daily index and merged into one unified analytical dataset.
-
-Relevant script:
-
-- `multimodal_glycemic_analysis/Scripts/MergeData.py`
-
-### 3. Feature engineering
-
-The merged dataset is enriched with lagged predictors so that recent history can be used for forecasting.
-
-Examples:
-
-- previous-day glucose summary
-- previous-day carbohydrate intake
-- previous-day training indicator
-- previous-day sleep score and duration
-- day index for temporal ordering
-
-Relevant script:
-
-- `multimodal_glycemic_analysis/Scripts/Processing_and_descriptive.py`
-
-### 4. Modeling
-
-The project benchmarks both regression and classification approaches using time-aware validation.
-
-Regression models currently include:
-
-- Lasso
-- Elastic Net
-- PCR with Ridge
-- Partial Least Squares
-- HistGradientBoostingRegressor
-
-Classification models currently include:
-
-- Logistic Regression
-- Elastic Net Logistic Regression
-- Gaussian Naive Bayes
-- Linear Discriminant Analysis
-- Linear SVM
-- RBF SVM
-- HistGradientBoostingClassifier
-
-Relevant script:
-
-- `multimodal_glycemic_analysis/Scripts/MLapplications.py`
-
-### 5. Orchestration
-
-The entire workflow can be launched from a single entry point:
-
-- `multimodal_glycemic_analysis/Scripts/pipeline.py`
-
-## Modeling Strategy
-
-The modeling code follows a deliberately conservative structure:
-
-- lagged features are used to reduce obvious same-day leakage
-- train and holdout sets are split chronologically
-- cross-validation uses `TimeSeriesSplit`
-- missing values are handled explicitly
-- results are saved to CSV and displayed in readable terminal tables
-
-The current evaluation focuses on:
-
-- regression `R²` for continuous glycemic targets
-- `ROC AUC` for binary risk formulations built from target quantiles
-
-## Project Structure
+## Architecture & Project Structure
 
 ```text
-multimodal_glycemic_analysis/
+Multimodal_glicemic_analysis/
 ├── multimodal_glycemic_analysis/
 │   ├── Data/
-│   │   ├── glooko/
-│   │   ├── xiaomi/
-│   │   └── processed/
+│   │   ├── glooko/                         # Raw CGM, insulin, bolus, and alarm exports
+│   │   ├── xiaomi/                         # Raw MiFitness daily aggregates and sport records
+│   │   └── processed/                      # Cleaned parquet tables, ML benchmarks, ablation & importance CSVs
 │   └── Scripts/
-│       ├── config.py
-│       ├── GlookoDataCleaning.py
-│       ├── XiaomiDataCleaning.py
-│       ├── MergeData.py
-│       ├── Processing_and_descriptive.py
-│       ├── MLapplications.py
-│       └── pipeline.py
+│       ├── config.py                       # Centralized paths, feature groups, and defaults
+│       ├── GlookoDataCleaning.py           # Time-weighted CGM stats, insulin & meal-carb ETL
+│       ├── XiaomiDataCleaning.py           # JSON payload unpacking for HR, sleep, steps & workouts
+│       ├── MergeData.py                    # Daily index alignment and outer join
+│       ├── Processing_and_descriptive.py   # Contiguous window detection, lags, rolling windows & calendar features
+│       ├── MLapplications.py               # TimeSeriesSplit benchmarks, baselines, ablation & permutation importance
+│       ├── Visualizations.py               # Automated report figure generation
+│       └── pipeline.py                     # Unified CLI orchestrator
+├── reports/
+│   └── figures/                            # Generated PNG visualizations
 ├── tests/
+│   └── test_pipeline.py                    # Unit tests (ETL math, gap trimming, anti-leakage, ablation)
 ├── requirements.txt
 └── README.md
 ```
 
-## Setup
+---
+
+## Setup & Usage
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate      # Windows
+# source .venv/bin/activate # Linux / macOS
 pip install -r requirements.txt
 ```
 
-## How to Run
-
-### Run the full pipeline
+### Run the full pipeline (ETL → Features → Benchmark & Ablation → Figures)
 
 ```bash
 python multimodal_glycemic_analysis/Scripts/pipeline.py all
 ```
 
-### Rebuild cleaned and merged data only
+### Run individual stages
 
 ```bash
 python multimodal_glycemic_analysis/Scripts/pipeline.py clean
-```
-
-### Build lagged features only
-
-```bash
 python multimodal_glycemic_analysis/Scripts/pipeline.py features --lag-days 2
+python multimodal_glycemic_analysis/Scripts/pipeline.py train --task all --holdout-days 28
+python multimodal_glycemic_analysis/Scripts/pipeline.py report
 ```
 
-### Train and compare models
+### Run automated tests
 
 ```bash
-python multimodal_glycemic_analysis/Scripts/pipeline.py train --task all --holdout-days 14
+python -m unittest discover -s tests -v
 ```
 
-### Reuse previously processed data for faster experiments
+---
 
-```bash
-python multimodal_glycemic_analysis/Scripts/pipeline.py train --task classification --reuse-processed
-```
+## Limitations & Next Steps
 
-## Outputs
-
-The pipeline writes intermediate and final artifacts to `multimodal_glycemic_analysis/Data/processed/`.
-
-Main outputs include:
-
-- `xiaomi_data_cleaned.parquet`
-- `glooko_data_cleaned.parquet`
-- `data_cleaned.parquet`
-- `data_processed.parquet`
-- `data_lagged.parquet`
-- `dataproc.csv`
-- `ml_results.csv`
-
-## Technical Highlights
-
-This repository demonstrates:
-
-- practical ETL on messy multi-source health exports
-- transformation of mixed raw formats into structured analytical tables
-- time-weighted glucose summary statistics
-- domain-specific feature rules for insulin and carbohydrate events
-- modular experiment orchestration
-- maintainable Python scripts instead of notebook-only logic
-- lightweight automated testing for critical pipeline helpers
-
-## Tests
-
-```bash
-python -m unittest discover -s tests
-```
-
-## Current Limitations
-
-This is still a research-oriented project rather than a production medical system.
-
-Important limitations include:
-
-- relatively small sample size
-- single-subject longitudinal data
-- daily aggregation may hide within-day dynamics
-- predictive performance is still modest, especially on regression tasks
-
-## Future Directions
-
-Natural next steps include:
-
-- richer rolling-window features
-- explicit next-day forecasting targets
-- post-prandial event modeling
-- probabilistic or quantile prediction
-- SHAP or permutation-based feature importance analysis
-- experiment tracking and model comparison dashboards
-
+- **Sample size (`n = 149` contiguous multimodal days, single subject)**: Limits complex nonlinear models and increases variance on a single 28-day chronological holdout.
+- **Daily aggregation**: Compresses sub-daily post-prandial and overnight glycemic excursions into daily summaries.
+- **Next steps**: Intraday post-prandial window modeling (2–4h post-meal CGM response), nested expanding-window backtesting, and probabilistic calibration.

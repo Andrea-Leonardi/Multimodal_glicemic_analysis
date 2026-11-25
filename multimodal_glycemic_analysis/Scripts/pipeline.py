@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 """
-This script is the main command-line entry point of the project.
-
-It does not contain the analytical logic itself. Instead, it orchestrates the
-different stages of the workflow so the user can run the project step by step
-or end to end from one place.
+Main command-line entry point for the Multimodal Glycemic Analysis pipeline.
 
 Available stages:
-1. clean raw data and build the merged daily dataset,
-2. create lagged features for modeling,
-3. run regression and classification benchmarks,
-4. execute the full pipeline in sequence.
+1. clean    - parse raw Glooko and Xiaomi exports and build the merged daily table,
+2. features - restrict to the contiguous multimodal window and build lagged/rolling features,
+3. train    - benchmark baselines + ML models, run Glooko-only vs multimodal ablation, and compute importance,
+4. report   - generate publication-ready PNG figures in `reports/figures/`,
+5. all      - execute the full workflow end to end.
 """
 
 import argparse
@@ -20,32 +17,40 @@ import sys
 import MergeData as merge_data
 import MLapplications as ml
 import Processing_and_descriptive as processing
+import Visualizations as viz
+import config as cfg
 
 
 def main() -> None:
     """CLI entry point that orchestrates the full project workflow."""
-    parser = argparse.ArgumentParser(description="Run the glycemic analysis pipeline.")
+    parser = argparse.ArgumentParser(description="Run the multimodal glycemic analysis pipeline.")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("clean", help="Rebuild cleaned and merged daily datasets.")
 
-    features_parser = subparsers.add_parser("features", help="Build lagged features from the merged dataset.")
-    features_parser.add_argument("--lag-days", type=int, default=2)
+    features_parser = subparsers.add_parser("features", help="Build lagged and rolling features.")
+    features_parser.add_argument("--lag-days", type=int, default=cfg.DEFAULT_LAG_DAYS)
     features_parser.add_argument("--reuse-merged", action="store_true")
+    features_parser.add_argument("--full-range", action="store_true")
 
-    train_parser = subparsers.add_parser("train", help="Run ML benchmarks on lagged features.")
-    train_parser.add_argument("--lag-days", type=int, default=2)
-    train_parser.add_argument("--holdout-days", type=int, default=14)
+    train_parser = subparsers.add_parser("train", help="Run ML benchmarks, ablation, and feature importance.")
+    train_parser.add_argument("--lag-days", type=int, default=cfg.DEFAULT_LAG_DAYS)
+    train_parser.add_argument("--holdout-days", type=int, default=cfg.DEFAULT_HOLDOUT_DAYS)
     train_parser.add_argument("--reuse-processed", action="store_true")
+    train_parser.add_argument("--no-ablation", action="store_true")
     train_parser.add_argument(
         "--task",
         choices=["all", "regression", "classification"],
         default="all",
     )
 
-    all_parser = subparsers.add_parser("all", help="Run clean, feature engineering and training in sequence.")
-    all_parser.add_argument("--lag-days", type=int, default=2)
-    all_parser.add_argument("--holdout-days", type=int, default=14)
+    report_parser = subparsers.add_parser("report", help="Generate PNG figures in reports/figures/.")
+    report_parser.add_argument("--lag-days", type=int, default=cfg.DEFAULT_LAG_DAYS)
+    report_parser.add_argument("--holdout-days", type=int, default=cfg.DEFAULT_HOLDOUT_DAYS)
+
+    all_parser = subparsers.add_parser("all", help="Run clean, features, train, and report in sequence.")
+    all_parser.add_argument("--lag-days", type=int, default=cfg.DEFAULT_LAG_DAYS)
+    all_parser.add_argument("--holdout-days", type=int, default=cfg.DEFAULT_HOLDOUT_DAYS)
     all_parser.add_argument(
         "--task",
         choices=["all", "regression", "classification"],
@@ -56,40 +61,33 @@ def main() -> None:
         parser.print_help()
         print(
             "\nExamples:\n"
-            "  python pipeline.py clean\n"
-            "  python pipeline.py features --lag-days 2\n"
-            "  python pipeline.py train --task all --holdout-days 14\n"
-            "  python pipeline.py all"
+            "  python multimodal_glycemic_analysis/Scripts/pipeline.py clean\n"
+            "  python multimodal_glycemic_analysis/Scripts/pipeline.py features --lag-days 2\n"
+            "  python multimodal_glycemic_analysis/Scripts/pipeline.py train --task all --holdout-days 28\n"
+            "  python multimodal_glycemic_analysis/Scripts/pipeline.py report\n"
+            "  python multimodal_glycemic_analysis/Scripts/pipeline.py all"
         )
         return
 
     args = parser.parse_args()
-
-    # ==================================================
-    # 1. Cleaning and merge only
-    # ==================================================
 
     if args.command == "clean":
         merged, _, _ = merge_data.build_cleaned_dataset(save_intermediate=True)
         print(f"Built merged dataset | rows={len(merged)} | columns={len(merged.columns)}")
         return
 
-    # ==================================================
-    # 2. Feature engineering only
-    # ==================================================
-
     if args.command == "features":
         lagged = processing.prepare_processed_dataset(
             rebuild_merged=not args.reuse_merged,
             save=True,
             lag_days=args.lag_days,
+            restrict_multimodal=not args.full_range,
         )
-        print(f"Built lagged dataset | rows={len(lagged)} | columns={len(lagged.columns)}")
+        print(
+            f"Built feature dataset | rows={len(lagged)} | columns={len(lagged.columns)} "
+            f"| range={lagged.index.min().date()}..{lagged.index.max().date()}"
+        )
         return
-
-    # ==================================================
-    # 3. Modeling only
-    # ==================================================
 
     if args.command == "train":
         results = ml.run_modeling(
@@ -97,25 +95,38 @@ def main() -> None:
             lag_days=args.lag_days,
             holdout_days=args.holdout_days,
             task=args.task,
+            run_ablation=not args.no_ablation,
         )
         print(ml.format_results(results))
-        print(f"\nSaved CSV: {ml.cfg.ML_RESULTS}")
+        print(f"\nSaved CSV: {cfg.ML_RESULTS}")
         return
 
-    # ==================================================
-    # 4. Full pipeline: clean -> features -> modeling
-    # ==================================================
+    if args.command == "report":
+        paths = viz.generate_all_figures(lag_days=args.lag_days, holdout_days=args.holdout_days)
+        for path in paths:
+            print(f"Saved figure: {path}")
+        return
 
+    # Full pipeline: clean -> features -> train -> report
     merge_data.build_cleaned_dataset(save_intermediate=True)
-    processing.prepare_processed_dataset(rebuild_merged=False, save=True, lag_days=args.lag_days)
+    processing.prepare_processed_dataset(
+        rebuild_merged=False,
+        save=True,
+        lag_days=args.lag_days,
+        restrict_multimodal=True,
+    )
     results = ml.run_modeling(
         rebuild_processed=False,
         lag_days=args.lag_days,
         holdout_days=args.holdout_days,
         task=args.task,
+        run_ablation=True,
     )
     print(ml.format_results(results))
-    print(f"\nSaved CSV: {ml.cfg.ML_RESULTS}")
+    print(f"\nSaved CSV: {cfg.ML_RESULTS}")
+    paths = viz.generate_all_figures(lag_days=args.lag_days, holdout_days=args.holdout_days)
+    for path in paths:
+        print(f"Saved figure: {path}")
 
 
 if __name__ == "__main__":
