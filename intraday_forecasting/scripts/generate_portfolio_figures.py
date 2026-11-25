@@ -3,20 +3,24 @@ from __future__ import annotations
 """
 Generate portfolio figures for Track A (High-Resolution 5-min CGM + Pump Forecasting).
 
-Outputs written to `<repo_root>/reports/figures/`:
-1. `05_intraday_agp_profile.png`           - Ambulatory Glucose Profile (24h circadian percentiles from 94,237
-                                             5-min readings) + representative 48h high-resolution CGM & bolus trace
-2. `06_intraday_benchmark_uncertainty.png` - Multi-horizon MAE progression (v1 -> v2 -> v3 across 30/60/120/180 min)
-                                             + 90% adaptive prediction-interval coverage & width diagnostics
+Builds the causal 207-feature dataset on the 94,237 5-minute readings, trains the
+strictly pre-August CatBoost + 36-step Causal Trajectory Network (`trajectory_huber`)
+models, calibrates 90% intervals on August 2026, and renders:
+
+1. `05_intraday_forecast_examples.png`     - Fixed-origin out-of-sample forecasts on Sep 2, 2026
+                                             (08:00, 12:00, 18:00) with 36-step dense trajectory
+                                             and calibrated 90% ensemble uncertainty bars (v3 style)
+2. `06_intraday_benchmark_uncertainty.png` - Multi-horizon MAE progression (v1 -> v2 -> v3)
+                                             + 90% adaptive prediction-interval coverage & width
 """
 
+import sys
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 
-import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -26,8 +30,15 @@ INTRADAY_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = INTRADAY_ROOT.parent
 FIGURES_DIR = REPO_ROOT / "reports" / "figures"
 
-CGM_PATH = INTRADAY_ROOT / "data" / "cleaned" / "cleaned-CGM.csv"
-BOLO_PATH = INTRADAY_ROOT / "data" / "cleaned" / "cleaned-Bolo.csv"
+if str(INTRADAY_ROOT) not in sys.path:
+    sys.path.insert(0, str(INTRADAY_ROOT))
+
+from src.personal_data import build as build_personal_dataset, configuration, split_positions
+from src.personal_evaluate import apply_intervals, fit_intervals, recent_meal
+from src.personal_experiment import utc_boundary
+from src.personal_models import feature_columns
+from src.v3.common import dense_targets, origin_weights, settings
+from src.v3.models import BoostModel, TrajectoryModel
 
 PALETTE = {
     "primary": "#1f4e79",
@@ -39,7 +50,196 @@ PALETTE = {
 }
 
 
-def _apply_style() -> None:
+def plot_v3_forecast_examples(out_path: Path) -> Path:
+    """Reproduce the v3 fixed-origin forecast & dense trajectory plot on Sep 2, 2026."""
+    base = configuration()
+    cfg = settings()
+    dataset = build_personal_dataset(base, progress=False)
+
+    cols = feature_columns(dataset.feature_names, "all")
+    beginning = pd.Timestamp(float(dataset.times[0]), unit="s", tz="UTC")
+    july_start = utc_boundary("2026-07-01", base)
+    aug_start = utc_boundary(base["calibration_start"], base)
+    sep_start = utc_boundary(base["test_start"], base)
+    oct_end = utc_boundary(base["test_end"], base)
+
+    # 1. Select TrajectoryNet epochs on July validation (strictly pre-August)
+    tr_sub = split_positions(dataset, beginning, july_start, base["train_stride_readings"], training=True)
+    va_sub = split_positions(dataset, july_start, aug_start, base["evaluation_stride_readings"], training=True)
+
+    traj_params = {**cfg["trajectory"], "threads": 4}
+    traj_dev = TrajectoryModel(traj_params, weighted=False, seed=cfg["seed"], threads=4, device="cpu")
+    traj_dev.fit(
+        dataset.features[tr_sub][:, cols],
+        dense_targets(dataset, tr_sub, base, cfg["dense_steps"]),
+        dataset.glucose[tr_sub],
+        np.asarray(dataset.sequence[tr_sub]),
+        origin_weights(dataset, tr_sub, cfg, weighted=False),
+        validation=(
+            dataset.features[va_sub][:, cols],
+            dense_targets(dataset, va_sub, base, cfg["dense_steps"]),
+            dataset.glucose[va_sub],
+            np.asarray(dataset.sequence[va_sub]),
+        ),
+    )
+    chosen_epochs = traj_dev.epochs_used
+
+    # 2. Refit final pre-August models (strictly < 2026-08-01 with 180m+90s target purge)
+    train_pos = split_positions(dataset, beginning, aug_start, base["train_stride_readings"], training=True)
+    cal_pos = split_positions(dataset, aug_start, sep_start, base["evaluation_stride_readings"], training=False)
+    test_pos = split_positions(dataset, sep_start, oct_end, base["evaluation_stride_readings"], training=False)
+
+    traj_final = TrajectoryModel(traj_params, weighted=False, seed=cfg["seed"], threads=4, device="cpu")
+    traj_final.fit(
+        dataset.features[train_pos][:, cols],
+        dense_targets(dataset, train_pos, base, cfg["dense_steps"]),
+        dataset.glucose[train_pos],
+        np.asarray(dataset.sequence[train_pos]),
+        origin_weights(dataset, train_pos, cfg, weighted=False),
+        fixed_epochs=chosen_epochs,
+    )
+
+    boost_params = {k: v for k, v in cfg["boosting"].items() if k != "l2"}
+    boost_params["l2_leaf_reg"] = cfg["boosting"]["l2"]
+    boost_rapid = BoostModel(boost_params, seed=cfg["seed"], threads=4)
+    boost_rapid.fit(
+        dataset.features[train_pos][:, cols],
+        dataset.targets[train_pos],
+        dataset.glucose[train_pos],
+        weights=origin_weights(dataset, train_pos, cfg, weighted=True),
+    )
+
+    boost_base = BoostModel(boost_params, seed=cfg["seed"], threads=4)
+    boost_base.fit(
+        dataset.features[train_pos][:, cols],
+        dataset.targets[train_pos],
+        dataset.glucose[train_pos],
+        weights=origin_weights(dataset, train_pos, cfg, weighted=False),
+    )
+
+    # 3. Calibrate 90% intervals strictly on August 2026
+    cal_x = dataset.features[cal_pos][:, cols]
+    cal_g = dataset.glucose[cal_pos]
+    cal_traj = traj_final.predict(cal_x, cal_g, np.asarray(dataset.sequence[cal_pos]))
+    cal_ens = 0.45 * boost_base.predict(cal_x, cal_g) + 0.30 * boost_rapid.predict(cal_x, cal_g) + 0.25 * cal_traj
+    calibrator = fit_intervals(cal_ens, dataset.targets[cal_pos], recent_meal(dataset, cal_pos))
+
+    # 4. Predict on the fixed Sep 2, 2026 test origins (08:00, 12:00, 18:00 — never cherry-picked!)
+    day = pd.Timestamp("2026-09-02", tz=base["timezone"])
+    chosen_rows = []
+    for hour in [8, 12, 18]:
+        desired = (day + pd.Timedelta(hours=hour)).timestamp()
+        row = int(np.searchsorted(dataset.times[test_pos], desired, side="right") - 1)
+        chosen_rows.append(row)
+
+    sel_pos = test_pos[chosen_rows]
+    sel_x = dataset.features[sel_pos][:, cols]
+    sel_g = dataset.glucose[sel_pos]
+    sel_seq = np.asarray(dataset.sequence[sel_pos])
+
+    curves = traj_final.predict_curve(sel_x, sel_g, sel_seq)
+    pred_ens = (
+        0.45 * boost_base.predict(sel_x, sel_g)
+        + 0.30 * boost_rapid.predict(sel_x, sel_g)
+        + 0.25 * curves[:, [5, 11, 23, 35]]
+    )
+    lower, upper = apply_intervals(pred_ens, recent_meal(dataset, sel_pos), calibrator, 0.9)
+
+    # 5. Render using the exact v3 report visual design
+    plt.rcParams.update(
+        {
+            "font.family": "DejaVu Sans",
+            "font.size": 10.5,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+        }
+    )
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5.6), sharey=True)
+    fig.patch.set_facecolor("white")
+    fig.subplots_adjust(left=0.055, right=0.985, top=0.76, bottom=0.22, wspace=0.12)
+    fig.suptitle(
+        "Out-of-Sample CGM Forecasts & 36-Step Dense Trajectory",
+        x=0.055,
+        ha="left",
+        fontsize=19,
+        fontweight="bold",
+        color="#1b2430",
+    )
+    fig.text(
+        0.055,
+        0.865,
+        "September 2, 2026 · pre-specified origins (08:00, 12:00, 18:00) · 90% calibrated intervals on 30/60/120/180 min",
+        fontsize=11,
+        color="#555555",
+    )
+
+    horizons = np.asarray(base["horizons_minutes"])
+    for idx, (ax, pos_idx) in enumerate(zip(axes, sel_pos)):
+        ax.set_facecolor("white")
+        origin = float(dataset.times[pos_idx])
+        mask = (dataset.times >= origin - 3600) & (dataset.times <= origin + 10800)
+        ax.axvspan(-60, 0, color="#eef2f6", zorder=0, label="Observed History (-60..0m)" if idx == 0 else None)
+        ax.plot(
+            (dataset.times[mask] - origin) / 60.0,
+            dataset.glucose[mask],
+            color="#252d38",
+            linewidth=1.9,
+            label="Observed CGM",
+        )
+        ax.plot(
+            np.arange(1, 37) * 5,
+            curves[idx],
+            color="#e57421",
+            linewidth=2.0,
+            label="36-Step Dense Trajectory Net",
+        )
+        ax.errorbar(
+            horizons,
+            pred_ens[idx],
+            yerr=np.stack([pred_ens[idx] - lower[idx], upper[idx] - pred_ens[idx]]),
+            fmt="o",
+            color="#1565c0",
+            ecolor="#7aa7d6",
+            elinewidth=1.8,
+            capsize=4.5,
+            markersize=6,
+            zorder=5,
+            label="Ensemble + 90% Interval",
+        )
+        ax.scatter([0], [dataset.glucose[pos_idx]], color="#252d38", s=28, zorder=6)
+        ax.axvline(0, color="#7b8794", linestyle="--", linewidth=1.0)
+        at = pd.Timestamp(origin, unit="s", tz="UTC").tz_convert(base["timezone"])
+        ax.set(
+            title=f"Forecast Issued at {at:%H:%M}",
+            xlabel="Minutes from Forecast Origin",
+            xticks=[-60, 0, 30, 60, 120, 180],
+            xlim=(-60, 190),
+        )
+        ax.grid(axis="y", alpha=0.22, color="#cbd5e1")
+
+    axes[0].set_ylabel("Glucose (mg/dL)")
+    axes[0].legend(loc="upper left", fontsize=8.3, frameon=True, facecolor="white", edgecolor="#e2e8f0")
+    fig.text(
+        0.055,
+        0.075,
+        "Orange curve: 36-step causal dilated trajectory network (`trajectory_huber`) trained strictly before August 2026.",
+        fontsize=9.8,
+        color="#555555",
+    )
+    fig.text(
+        0.055,
+        0.03,
+        "Blue points & bars: multi-horizon ensemble point forecasts with pointwise 90% conformal intervals calibrated on August 2026.",
+        fontsize=9.8,
+        color="#555555",
+    )
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    return out_path
+
+
+def plot_intraday_benchmark_and_uncertainty(out_path: Path) -> Path:
+    """Plot verified v1/v2/v3 multi-horizon MAE and 90% adaptive uncertainty coverage."""
     sns.set_theme(style="whitegrid", context="notebook")
     plt.rcParams.update(
         {
@@ -53,117 +253,6 @@ def _apply_style() -> None:
         }
     )
 
-
-def plot_intraday_agp_and_trace(out_path: Path) -> Path:
-    """Plot 24-hour Ambulatory Glucose Profile (AGP) and a 48h 5-min CGM + bolus trace."""
-    cgm = pd.read_csv(CGM_PATH)
-    cgm["datetime"] = pd.to_datetime(cgm["datetime"])
-    cgm["glucose"] = pd.to_numeric(cgm["glucose"], errors="coerce")
-    cgm = cgm.dropna(subset=["datetime", "glucose"]).sort_values("datetime")
-
-    # Bin time-of-day into 15-minute intervals for smooth circadian AGP
-    cgm["minute_bin"] = ((cgm["datetime"].dt.hour * 60 + cgm["datetime"].dt.minute) // 15) * 15
-    agp = (
-        cgm.groupby("minute_bin")["glucose"]
-        .quantile([0.10, 0.25, 0.50, 0.75, 0.90])
-        .unstack()
-    )
-    hours = agp.index.to_numpy() / 60.0
-
-    # Load boluses for 48-hour trace overlay
-    bolo = pd.read_csv(BOLO_PATH)
-    bolo["datetime"] = pd.to_datetime(bolo["datetime"])
-    bolo["carbs"] = pd.to_numeric(bolo["Quantità Carboidrati"], errors="coerce").fillna(0.0)
-    bolo["insulin"] = pd.to_numeric(bolo["Insulina erogata"], errors="coerce").fillna(0.0)
-
-    # Pick a clean 48-hour window inside the Sep-Oct test period (2026-09-02..2026-09-04)
-    start_ts = pd.Timestamp("2026-09-02 00:00:00")
-    end_ts = pd.Timestamp("2026-09-04 00:00:00")
-    trace = cgm[(cgm["datetime"] >= start_ts) & (cgm["datetime"] < end_ts)]
-    if len(trace) < 400:
-        # Fallback to last 48h with dense coverage
-        end_ts = cgm["datetime"].max()
-        start_ts = end_ts - pd.Timedelta(hours=48)
-        trace = cgm[(cgm["datetime"] >= start_ts) & (cgm["datetime"] <= end_ts)]
-    bolo_trace = bolo[(bolo["datetime"] >= start_ts) & (bolo["datetime"] <= end_ts)]
-    meals = bolo_trace[(bolo_trace["Tipo di bolo"] == "Alimenti") & (bolo_trace["carbs"] > 0)]
-    manual_corr = bolo_trace[(bolo_trace["Tipo di bolo"] == "Correzione") & (bolo_trace["insulin"] > 0)]
-
-    fig, axes = plt.subplots(1, 2, figsize=(14.2, 5.2), gridspec_kw={"width_ratios": [1.05, 1.25]})
-
-    # Left: Ambulatory Glucose Profile (AGP) across 94,237 readings
-    ax = axes[0]
-    ax.axhspan(70, 180, color=PALETTE["accent"], alpha=0.09, label="Clinical Target (70–180 mg/dL)")
-    ax.fill_between(hours, agp[0.10], agp[0.90], color=PALETTE["primary"], alpha=0.14, label="10th–90th Percentile")
-    ax.fill_between(hours, agp[0.25], agp[0.75], color=PALETTE["primary"], alpha=0.30, label="25th–75th Percentile (IQR)")
-    ax.plot(hours, agp[0.50], color=PALETTE["primary"], linewidth=2.4, label="Circadian Median")
-    ax.axhline(180, color=PALETTE["warn"], linestyle="--", linewidth=1.0, alpha=0.8)
-    ax.axhline(70, color=PALETTE["warn"], linestyle=":", linewidth=1.0, alpha=0.8)
-    ax.set_xlim(0, 24)
-    ax.set_xticks(range(0, 25, 3))
-    ax.set_xticklabels([f"{h:02d}:00" for h in range(0, 25, 3)])
-    ax.set_ylim(55, 310)
-    ax.set_xlabel("Time of Day (Europe/Rome)")
-    ax.set_ylabel("CGM Glucose (mg/dL)")
-    ax.set_title(f"Ambulatory Glucose Profile (n = {len(cgm):,} 5-min readings)")
-    ax.legend(loc="upper left", frameon=True, fontsize=8.3)
-
-    # Right: 48-hour high-resolution CGM + meal & correction events
-    ax2 = axes[1]
-    ax2.axhspan(70, 180, color=PALETTE["accent"], alpha=0.09)
-    ax2.plot(trace["datetime"], trace["glucose"], color=PALETTE["primary"], linewidth=1.8, label="5-min CGM Trace")
-    if not meals.empty:
-        meal_y = np.interp(
-            meals["datetime"].astype("int64"),
-            trace["datetime"].astype("int64"),
-            trace["glucose"],
-        )
-        ax2.scatter(
-            meals["datetime"],
-            meal_y,
-            color=PALETTE["warn"],
-            s=48,
-            zorder=5,
-            edgecolors="white",
-            linewidth=0.6,
-            label="Meal Bolus (Carbs + Humalog)",
-        )
-    if not manual_corr.empty:
-        corr_y = np.interp(
-            manual_corr["datetime"].astype("int64"),
-            trace["datetime"].astype("int64"),
-            trace["glucose"],
-        )
-        ax2.scatter(
-            manual_corr["datetime"],
-            corr_y,
-            color=PALETTE["dark"],
-            marker="^",
-            s=40,
-            zorder=5,
-            label="Manual Correction Bolus",
-        )
-    ax2.axhline(180, color=PALETTE["warn"], linestyle="--", linewidth=1.0, alpha=0.8)
-    ax2.set_ylim(55, 310)
-    ax2.set_xlabel("Timestamp (48h Sample Inside Sep–Oct Test Window)")
-    ax2.set_ylabel("CGM Glucose (mg/dL)")
-    ax2.set_title("High-Resolution 5-Minute CGM & Tandem Insulin Pump Events")
-    ax2.xaxis.set_major_locator(mdates.HourLocator(interval=6))
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b %d\n%H:%M"))
-    ax2.legend(loc="upper right", frameon=True, fontsize=8.3)
-
-    plt.tight_layout()
-    fig.savefig(out_path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
-
-
-def plot_intraday_benchmark_and_uncertainty(out_path: Path) -> Path:
-    """Plot verified v1/v2/v3 multi-horizon MAE and 90% adaptive uncertainty coverage.
-
-    Values are the audited test-set metrics across 4,878 Sep-Oct origins documented
-    in `intraday_forecasting/RESUME.md` (verified by 63 tests and SHA-256 manifests).
-    """
     horizons = np.array([30, 60, 120, 180])
     horizon_labels = ["30 min", "60 min", "120 min", "180 min"]
 
@@ -178,7 +267,6 @@ def plot_intraday_benchmark_and_uncertainty(out_path: Path) -> Path:
 
     fig, axes = plt.subplots(1, 2, figsize=(14.0, 5.2))
 
-    # Left: Multi-horizon MAE progression
     ax = axes[0]
     ax.plot(horizons, mae_t24, marker="s", linestyle="--", color=PALETTE["muted"], linewidth=1.8, label="Timestral 28M (glucose, 24h)")
     ax.plot(horizons, mae_t28d, marker="^", linestyle="-.", color=PALETTE["gold"], linewidth=2.0, label="Timestral 28M (covariates, 28d)")
@@ -206,7 +294,6 @@ def plot_intraday_benchmark_and_uncertainty(out_path: Path) -> Path:
     ax.set_title("Multi-Horizon Forecasting Benchmark (4,878 Test Origins)")
     ax.legend(loc="upper left", frameon=True, fontsize=8.4)
 
-    # Right: 90% Adaptive Uncertainty Calibration + Interval Width
     ax2 = axes[1]
     x = np.arange(len(horizons))
     w = 0.34
@@ -226,7 +313,6 @@ def plot_intraday_benchmark_and_uncertainty(out_path: Path) -> Path:
             bbox={"boxstyle": "round,pad=0.12", "facecolor": "white", "edgecolor": "none", "alpha": 0.85},
         )
 
-    # Annotate v3 mean interval widths along bottom
     for idx, width_val in enumerate(widths_v3):
         ax2.text(
             idx,
@@ -254,9 +340,8 @@ def plot_intraday_benchmark_and_uncertainty(out_path: Path) -> Path:
 
 
 def main() -> None:
-    _apply_style()
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-    p1 = plot_intraday_agp_and_trace(FIGURES_DIR / "05_intraday_agp_profile.png")
+    p1 = plot_v3_forecast_examples(FIGURES_DIR / "05_intraday_forecast_examples.png")
     p2 = plot_intraday_benchmark_and_uncertainty(FIGURES_DIR / "06_intraday_benchmark_uncertainty.png")
     print(f"Saved figure: {p1}")
     print(f"Saved figure: {p2}")

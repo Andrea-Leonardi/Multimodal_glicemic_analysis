@@ -18,9 +18,9 @@ An end-to-end longitudinal health data science and deep learning repository comb
 
 ## Track A: High-Resolution 5-Minute CGM Forecasting (`intraday_forecasting/`)
 
-### Ambulatory Glucose Profile & High-Resolution Pump Telemetry
+### Out-of-Sample Forecasts, 36-Step Dense Trajectory & 90% Uncertainty Intervals
 
-![Ambulatory Glucose Profile and 48h High-Resolution Trace](reports/figures/05_intraday_agp_profile.png)
+![Out-of-Sample CGM Forecasts and 36-Step Dense Trajectory](reports/figures/05_intraday_forecast_examples.png)
 
 ### Multi-Horizon Benchmark & 90% Adaptive Uncertainty Calibration (`4,878` Sep–Oct Test Origins)
 
