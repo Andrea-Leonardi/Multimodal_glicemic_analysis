@@ -1,0 +1,12 @@
+{
+  "build": {
+    "limit_mib": 4096,
+    "reserve_mib": 4096,
+    "threads": 1
+  },
+  "training": {
+    "limit_mib": 16384,
+    "reserve_mib": 4096,
+    "threads": 8
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "seed": 42,
+  "threads": 8,
+  "output": "outputs/personal-v3",
+  "dataset": "outputs/memory-check/dataset",
+  "v2": "outputs/personal-v2",
+  "prediction_batch_size": 8,
+  "dense_steps": 36,
+  "rapid_threshold_mgdl_min": 2.0,
+  "rapid_weight": 2.0,
+  "meal_weight": 1.25,
+  "boosting": {"depth": 6, "iterations": 700, "l2": 15.0, "learning_rate": 0.04},
+  "trajectory": {"epochs": 16, "patience": 3, "batch_size": 256, "learning_rate": 0.0008, "slope_penalty": 0.15},
+  "finetune": {
+    "train_stride_readings": 12,
+    "selection_stride_readings": 12,
+    "epochs": 4,
+    "patience": 2,
+    "head_learning_rate": 0.0001,
+    "block_learning_rate": 0.00002,
+    "anchor_penalty": 0.001,
+    "specs": [
+      {"name": "timestral_head24", "context_hours": 24, "mode": "glucose", "last_block": false, "batch_size": 16},
+      {"name": "timestral_last72", "context_hours": 72, "mode": "physical", "last_block": true, "batch_size": 4}
+    ]
+  },
+  "weekly": {"update_days": 7, "models": ["weekly_direct", "weekly_residual_long"]},
+  "ensemble": {"steps": 20, "minimum_gain_mgdl": 0.05, "minimum_regime_rows": 200, "regime_shrinkage_rows": 500},
+  "intervals": {
+    "levels": [0.8, 0.9],
+    "scale_depth": 4,
+    "scale_iterations": 250,
+    "minimum_scale_mgdl": 3.0,
+    "minimum_calibration_rows": 60,
+    "rolling_days": 28,
+    "selection_train_end": "2026-07-01",
+    "selection_calibration_end": "2026-07-16",
+    "modes": ["constant_meal", "adaptive_group", "adaptive_rolling"]
+  },
+  "bootstrap_repetitions": 500,
+  "evaluation_note": "Exploratory v3 after v2 test inspection; all choices before new scoring, final confirmation requires a new independent period."
+}

@@ -1,0 +1,27 @@
+{
+  "timezone": "Europe/Rome",
+  "frequency_minutes": 5,
+  "horizons_minutes": [30, 60, 120, 180],
+  "validation_start": "2026-07-01",
+  "calibration_start": "2026-08-01",
+  "test_start": "2026-09-01",
+  "test_end": "2026-10-23",
+  "context_hours": [6, 12, 24],
+  "origin_stride_minutes": 60,
+  "validation_origin_stride_minutes": 180,
+  "max_missing_context_fraction": 0.1,
+  "cgm_latency_minutes": 0,
+  "manual_latency_minutes": 0,
+  "pump_latency_minutes": 0,
+  "batch_size": 16,
+  "torch_threads": 8,
+  "seed": 42,
+  "bootstrap_repetitions": 500,
+  "models": ["persistence", "damped_trend", "timestral-28m", "timestral-209m"],
+  "covariate_modes": ["glucose", "manual", "pump"],
+  "timestral_code_revision": "a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff",
+  "model_revisions": {
+    "timestral-28m": "49b26409ac87b5935539a5d8ffe7f397b720db47",
+    "timestral-209m": "9874d252ab0aae16f7f7c999f98f98d6ad7d8365"
+  }
+}

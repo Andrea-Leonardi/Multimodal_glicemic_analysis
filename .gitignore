@@ -6,4 +6,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv*/
 venv/
+*:Zone.Identifier
+
+# Heavy local training caches & experiment outputs (intraday Track A)
+intraday_forecasting/outputs/
+intraday_forecasting/data/processed/
+intraday_forecasting/models/

@@ -1,0 +1,31 @@
+{
+  "timezone": "Europe/Rome",
+  "insulin": "Humalog (lispro)",
+  "horizons_minutes": [30, 60, 120, 180],
+  "target_tolerance_seconds": 90,
+  "history_tolerance_seconds": 90,
+  "history_days": 7,
+  "train_stride_readings": 3,
+  "evaluation_stride_readings": 3,
+  "folds": [
+    ["2026-04-01", "2026-05-01"],
+    ["2026-06-01", "2026-07-01"],
+    ["2026-07-01", "2026-08-01"]
+  ],
+  "calibration_start": "2026-08-01",
+  "test_start": "2026-09-01",
+  "test_end": "2026-10-23",
+  "seed": 42,
+  "threads": 8,
+  "build_block_size": 512,
+  "insulin_curves": [[240, 55, 10], [300, 75, 10], [360, 75, 10], [420, 90, 10]],
+  "timestral_context_hours": [24, 72, 168],
+  "timestral_models": ["timestral-28m", "timestral-209m"],
+  "timestral_selection_stride_readings": 12,
+  "timestral_batch_size": 8,
+  "model_revisions": {
+    "timestral-28m": "49b26409ac87b5935539a5d8ffe7f397b720db47",
+    "timestral-209m": "9874d252ab0aae16f7f7c999f98f98d6ad7d8365"
+  },
+  "bootstrap_repetitions": 500
+}
