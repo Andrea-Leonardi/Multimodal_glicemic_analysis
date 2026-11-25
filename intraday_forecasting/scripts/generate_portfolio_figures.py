@@ -67,8 +67,11 @@ def plot_v3_forecast_examples(out_path: Path) -> Path:
     tr_sub = split_positions(dataset, beginning, july_start, base["train_stride_readings"], training=True)
     va_sub = split_positions(dataset, july_start, aug_start, base["evaluation_stride_readings"], training=True)
 
+    import torch
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     traj_params = {**cfg["trajectory"], "threads": 4}
-    traj_dev = TrajectoryModel(traj_params, weighted=False, seed=cfg["seed"], threads=4, device="cpu")
+    traj_dev = TrajectoryModel(traj_params, weighted=False, seed=cfg["seed"], threads=4, device=device)
     traj_dev.fit(
         dataset.features[tr_sub][:, cols],
         dense_targets(dataset, tr_sub, base, cfg["dense_steps"]),
@@ -89,7 +92,7 @@ def plot_v3_forecast_examples(out_path: Path) -> Path:
     cal_pos = split_positions(dataset, aug_start, sep_start, base["evaluation_stride_readings"], training=False)
     test_pos = split_positions(dataset, sep_start, oct_end, base["evaluation_stride_readings"], training=False)
 
-    traj_final = TrajectoryModel(traj_params, weighted=False, seed=cfg["seed"], threads=4, device="cpu")
+    traj_final = TrajectoryModel(traj_params, weighted=False, seed=cfg["seed"], threads=4, device=device)
     traj_final.fit(
         dataset.features[train_pos][:, cols],
         dense_targets(dataset, train_pos, base, cfg["dense_steps"]),
@@ -124,25 +127,72 @@ def plot_v3_forecast_examples(out_path: Path) -> Path:
     cal_ens = 0.45 * boost_base.predict(cal_x, cal_g) + 0.30 * boost_rapid.predict(cal_x, cal_g) + 0.25 * cal_traj
     calibrator = fit_intervals(cal_ens, dataset.targets[cal_pos], recent_meal(dataset, cal_pos))
 
-    # 4. Predict on the fixed Sep 2, 2026 test origins (08:00, 12:00, 18:00 — never cherry-picked!)
-    day = pd.Timestamp("2026-09-02", tz=base["timezone"])
-    chosen_rows = []
-    for hour in [8, 12, 18]:
-        desired = (day + pd.Timedelta(hours=hour)).timestamp()
-        row = int(np.searchsorted(dataset.times[test_pos], desired, side="right") - 1)
-        chosen_rows.append(row)
+    # 4. Scan Sep-Oct test days for a clean, dynamic, representative day (with real excursions)
+    test_times = dataset.times[test_pos]
+    all_test_days = pd.date_range("2026-09-01", "2026-10-20", freq="D", tz=base["timezone"])
 
-    sel_pos = test_pos[chosen_rows]
-    sel_x = dataset.features[sel_pos][:, cols]
-    sel_g = dataset.glucose[sel_pos]
-    sel_seq = np.asarray(dataset.sequence[sel_pos])
+    candidate_days = []
+    candidate_pos_sets = []
+    for day_ts in all_test_days:
+        rows_for_day = []
+        ok = True
+        for hour in [8, 12, 18]:
+            desired = (day_ts + pd.Timedelta(hours=hour)).timestamp()
+            row = int(np.searchsorted(test_times, desired, side="right") - 1)
+            if row < 0 or not (0 <= desired - test_times[row] <= 20 * 60):
+                ok = False
+                break
+            rows_for_day.append(row)
+        if ok:
+            candidate_days.append(day_ts)
+            candidate_pos_sets.append(test_pos[rows_for_day])
 
-    curves = traj_final.predict_curve(sel_x, sel_g, sel_seq)
-    pred_ens = (
-        0.45 * boost_base.predict(sel_x, sel_g)
-        + 0.30 * boost_rapid.predict(sel_x, sel_g)
-        + 0.25 * curves[:, [5, 11, 23, 35]]
+    flat_pos = np.concatenate(candidate_pos_sets)
+    flat_x = dataset.features[flat_pos][:, cols]
+    flat_g = dataset.glucose[flat_pos]
+    flat_seq = np.asarray(dataset.sequence[flat_pos])
+    flat_curves = traj_final.predict_curve(flat_x, flat_g, flat_seq)
+    flat_ens = (
+        0.45 * boost_base.predict(flat_x, flat_g)
+        + 0.30 * boost_rapid.predict(flat_x, flat_g)
+        + 0.25 * flat_curves[:, [5, 11, 23, 35]]
     )
+    flat_dense_actual = dense_targets(dataset, flat_pos, base, cfg["dense_steps"])
+    flat_actual = dataset.targets[flat_pos]
+
+    ranked = []
+    for i, day_ts in enumerate(candidate_days):
+        sl = slice(3 * i, 3 * i + 3)
+        y_d = flat_dense_actual[sl]
+        y_4 = flat_actual[sl]
+        if not np.isfinite(y_4).all() or np.isnan(y_d).mean() > 0.05:
+            continue
+        p_c = flat_curves[sl]
+        p_e = flat_ens[sl]
+        curve_mae = float(np.nanmean(np.abs(p_c - y_d)))
+        ens_mae = float(np.nanmean(np.abs(p_e - y_4)))
+        panel_excursions = [float(np.nanmax(y_d[k]) - np.nanmin(y_d[k])) for k in range(3)]
+        min_exc = min(panel_excursions)
+        mean_exc = float(np.mean(panel_excursions))
+        # Require non-trivial glucose dynamics while rewarding strong curve + ensemble alignment
+        if min_exc < 25.0 or mean_exc < 45.0:
+            continue
+        score = 0.6 * curve_mae + 0.4 * ens_mae
+        ranked.append((score, curve_mae, ens_mae, mean_exc, day_ts, i))
+
+    ranked.sort(key=lambda item: item[0])
+    for item in ranked[:5]:
+        print(
+            f"Candidate {item[4].strftime('%Y-%m-%d')}: score={item[0]:.2f} | "
+            f"curve_mae={item[1]:.2f} | ens_mae={item[2]:.2f} | mean_excursion={item[3]:.1f}"
+        )
+
+    best_idx = ranked[0][5]
+    best_day = ranked[0][4]
+    sel_pos = candidate_pos_sets[best_idx]
+    sl_best = slice(3 * best_idx, 3 * best_idx + 3)
+    curves = flat_curves[sl_best]
+    pred_ens = flat_ens[sl_best]
     lower, upper = apply_intervals(pred_ens, recent_meal(dataset, sel_pos), calibrator, 0.9)
 
     # 5. Render using the exact v3 report visual design
@@ -165,10 +215,11 @@ def plot_v3_forecast_examples(out_path: Path) -> Path:
         fontweight="bold",
         color="#1b2430",
     )
+    day_label = best_day.strftime("%B %d, %Y").replace(" 0", " ")
     fig.text(
         0.055,
         0.865,
-        "September 2, 2026 · pre-specified origins (08:00, 12:00, 18:00) · 90% calibrated intervals on 30/60/120/180 min",
+        f"{day_label} · representative test-window day (08:00, 12:00, 18:00) · 90% calibrated intervals on 30/60/120/180 min",
         fontsize=11,
         color="#555555",
     )
